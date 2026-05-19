@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Editor
+.vscode/
+.idea/
+.DS_Store
+
+# Logs
+*.log
+
+# Claude Code local settings (personal, not team-wide)
+.claude/settings.local.json
+
+# stablecoin.db is intentionally tracked so GitHub Actions can
+# commit refreshed data and Streamlit Cloud picks it up on redeploy.

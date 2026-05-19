@@ -1,0 +1,48 @@
+name: Nightly data refresh
+
+on:
+  schedule:
+    - cron: '0 2 * * *'   # 2:00 AM UTC every night
+  workflow_dispatch:        # allow manual trigger from the Actions tab
+
+permissions:
+  contents: write           # needed to push the updated database back
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -e .
+
+      - name: Update supply
+        run: python -m pipelines.update_supply
+
+      - name: Update prices
+        run: python -m pipelines.update_prices
+
+      - name: Update reserves
+        run: python -m pipelines.update_reserves
+
+      - name: Score stablecoins
+        run: python -m pipelines.score_stablecoins
+
+      - name: Commit updated database
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add stablecoin.db
+          git diff --staged --quiet \
+            && echo "No changes — skipping commit" \
+            || git commit -m "chore: nightly data refresh [skip ci]"
+          git push
