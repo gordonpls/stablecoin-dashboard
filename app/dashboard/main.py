@@ -772,7 +772,7 @@ def render_risk_tab(df: pd.DataFrame) -> None:
         xaxis=dict(range=[0, 100], title="Score", gridcolor="rgba(128,128,128,0.12)", zeroline=False),
         yaxis=dict(gridcolor="rgba(0,0,0,0)", zeroline=False, autorange="reversed"),
         legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0),
-        margin={"t": 56, "r": 16, "b": 40, "l": 80},
+        margin={"t": 80, "r": 16, "b": 40, "l": 80},
     ))
     st.plotly_chart(fig, use_container_width=True)
 
