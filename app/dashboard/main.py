@@ -746,9 +746,6 @@ def main() -> None:
 
     st.sidebar.markdown("---")
     st.sidebar.caption(f"Data as of {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC")
-    if st.sidebar.button("Clear cache & reload"):
-        st.cache_data.clear()
-        st.rerun()
 
     st.sidebar.markdown("---")
     st.sidebar.subheader("Manual Refresh")
