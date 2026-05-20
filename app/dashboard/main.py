@@ -5,6 +5,13 @@ Reads directly from SQLite. Run ingestion pipelines first to populate data.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# Add repo root to sys.path so local packages (db, core, ingestion, pipelines)
+# are importable regardless of which directory Streamlit uses as its working dir.
+sys.path.insert(0, str(Path(__file__).parents[2]))
+
 import json
 from datetime import datetime, timedelta
 
