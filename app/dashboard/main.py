@@ -43,7 +43,7 @@ C_GREEN    = "#22c55e"
 C_AMBER    = "#f59e0b"
 C_ORANGE   = "#f97316"
 C_RED      = "#ef4444"
-C_MUTED    = "rgba(128,128,128,0.55)"
+C_MUTED    = "rgba(100,100,100,0.9)"
 
 RISK_COLORS = {
     "Low Risk":  C_GREEN,
@@ -384,7 +384,7 @@ def _inject_styles() -> None:
 .streamlit-expanderHeader {
     font-size: 13px !important;
     font-weight: 600 !important;
-    color: rgba(128,128,128,0.8) !important;
+    color: rgba(90,90,90,0.9) !important;
 }
 
 /* ── Tighter selectbox / slider labels ── */
@@ -393,7 +393,7 @@ def _inject_styles() -> None:
     font-weight: 600 !important;
     text-transform: uppercase !important;
     letter-spacing: 0.06em !important;
-    opacity: 0.6 !important;
+    opacity: 0.85 !important;
 }
 
 /* ── Divider spacing ── */
@@ -938,7 +938,7 @@ def main() -> None:
             st.sidebar.error("Incorrect password")
 
     st.sidebar.markdown(
-        "<p style='font-size:11px; color:rgba(128,128,128,0.5); margin-top:32px;'>"
+        "<p style='font-size:11px; color:rgba(100,100,100,0.8); margin-top:32px;'>"
         "Data sourced from DefiLlama, Binance, and Coinbase public APIs. "
         "Not financial advice.</p>",
         unsafe_allow_html=True,
