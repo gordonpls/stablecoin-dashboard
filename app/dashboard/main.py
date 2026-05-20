@@ -8,15 +8,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# Add repo root to sys.path so local packages (db, core, ingestion, pipelines)
-# are importable regardless of which directory Streamlit uses as its working dir.
+# Ensure repo root is on sys.path regardless of Streamlit's working directory.
 sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import json
 from datetime import datetime, timedelta
 
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 from sqlalchemy import func, select
@@ -37,16 +35,29 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
+# ── design tokens ─────────────────────────────────────────────────────────────
+
+C_PRIMARY  = "#6366f1"
+C_BLUE     = "#3b82f6"
+C_GREEN    = "#22c55e"
+C_AMBER    = "#f59e0b"
+C_ORANGE   = "#f97316"
+C_RED      = "#ef4444"
+C_MUTED    = "rgba(128,128,128,0.55)"
+
 RISK_COLORS = {
-    "Low Risk":  "#22c55e",
-    "Moderate":  "#eab308",
-    "Elevated":  "#f97316",
-    "High Risk": "#ef4444",
+    "Low Risk":  C_GREEN,
+    "Moderate":  C_AMBER,
+    "Elevated":  C_ORANGE,
+    "High Risk": C_RED,
 }
 
-SCORE_COLORS = ["#6366f1", "#22c55e", "#f59e0b", "#ec4899"]
+SCORE_COLORS = [C_PRIMARY, C_GREEN, C_AMBER, "#ec4899"]
 SCORE_COLS   = ["peg_score", "liquidity_score", "reserve_score", "adoption_score"]
+SCORE_LABELS = ["Peg", "Liquidity", "Reserve", "Adoption"]
 
+
+# ── helpers ───────────────────────────────────────────────────────────────────
 
 def risk_label(score: float | None) -> str:
     if score is None:
@@ -81,7 +92,7 @@ def _fmt_freshness(scored_at: datetime | None) -> str:
     if scored_at is None:
         return "—"
     delta = datetime.utcnow() - scored_at
-    mins = int(delta.total_seconds() / 60)
+    mins  = int(delta.total_seconds() / 60)
     if mins < 60:
         return f"{mins}m ago"
     hours = mins // 60
@@ -91,7 +102,6 @@ def _fmt_freshness(scored_at: datetime | None) -> str:
 
 
 def _parse_chain_data(supply_by_chain_json: str | None) -> tuple[str, float | None, float | None]:
-    """Return (top_chain_name, prev_week_supply_usd, prev_month_supply_usd)."""
     if not supply_by_chain_json:
         return "—", None, None
     try:
@@ -111,6 +121,43 @@ def _parse_chain_data(supply_by_chain_json: str | None) -> tuple[str, float | No
         return "—", None, None
 
 
+def _chart_layout(title: str = "", height: int = 400, **kwargs) -> dict:
+    """Consistent Plotly layout across all charts."""
+    base: dict = {
+        "title":         {"text": title, "font": {"size": 15, "color": "rgba(200,200,200,0.9)"}, "x": 0, "xanchor": "left"},
+        "plot_bgcolor":  "rgba(0,0,0,0)",
+        "paper_bgcolor": "rgba(0,0,0,0)",
+        "font":          {"size": 12},
+        "height":        height,
+        "margin":        {"t": 48, "r": 16, "b": 48, "l": 60},
+        "hoverlabel":    {"bgcolor": "rgba(30,30,30,0.95)", "font_color": "white", "bordercolor": "rgba(255,255,255,0.1)"},
+        "xaxis":         {"showgrid": False, "zeroline": False},
+        "yaxis":         {"gridcolor": "rgba(128,128,128,0.12)", "zeroline": False},
+    }
+    base.update(kwargs)
+    return base
+
+
+def _section_header(title: str, description: str) -> None:
+    st.markdown(f"### {title}")
+    st.markdown(
+        f"<p style='color:{C_MUTED}; font-size:14px; margin-top:-10px; "
+        f"margin-bottom:20px; line-height:1.6;'>{description}</p>",
+        unsafe_allow_html=True,
+    )
+
+
+def _callout(text: str, kind: str = "info") -> None:
+    colors = {"info": C_BLUE, "warning": C_AMBER, "danger": C_RED}
+    c = colors.get(kind, C_BLUE)
+    st.markdown(
+        f"<div style='border-left:3px solid {c}; background:rgba(128,128,128,0.07); "
+        f"padding:10px 16px; border-radius:0 6px 6px 0; font-size:13px; "
+        f"line-height:1.5; margin-bottom:16px;'>{text}</div>",
+        unsafe_allow_html=True,
+    )
+
+
 # ── data loaders ──────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=120, show_spinner=False)
@@ -118,49 +165,37 @@ def load_overview() -> pd.DataFrame:
     with get_session() as session:
         supply_sq = (
             select(SupplySnapshot.symbol, func.max(SupplySnapshot.recorded_at).label("ts"))
-            .group_by(SupplySnapshot.symbol)
-            .subquery()
+            .group_by(SupplySnapshot.symbol).subquery()
         )
         latest_supplies = {
-            row.symbol: row
-            for row in session.execute(
-                select(SupplySnapshot).join(
-                    supply_sq,
-                    (SupplySnapshot.symbol == supply_sq.c.symbol)
-                    & (SupplySnapshot.recorded_at == supply_sq.c.ts),
-                )
+            row.symbol: row for row in session.execute(
+                select(SupplySnapshot).join(supply_sq,
+                    (SupplySnapshot.symbol == supply_sq.c.symbol) &
+                    (SupplySnapshot.recorded_at == supply_sq.c.ts))
             ).scalars().all()
         }
 
         score_sq = (
             select(RiskScore.symbol, func.max(RiskScore.scored_at).label("scored_at"))
-            .group_by(RiskScore.symbol)
-            .subquery()
+            .group_by(RiskScore.symbol).subquery()
         )
         latest_scores = {
-            row.symbol: row
-            for row in session.execute(
-                select(RiskScore).join(
-                    score_sq,
-                    (RiskScore.symbol == score_sq.c.symbol)
-                    & (RiskScore.scored_at == score_sq.c.scored_at),
-                )
+            row.symbol: row for row in session.execute(
+                select(RiskScore).join(score_sq,
+                    (RiskScore.symbol == score_sq.c.symbol) &
+                    (RiskScore.scored_at == score_sq.c.scored_at))
             ).scalars().all()
         }
 
         price_sq = (
             select(PriceSnapshot.symbol, func.max(PriceSnapshot.recorded_at).label("ts"))
-            .group_by(PriceSnapshot.symbol)
-            .subquery()
+            .group_by(PriceSnapshot.symbol).subquery()
         )
         latest_prices = {
-            row.symbol: row
-            for row in session.execute(
-                select(PriceSnapshot).join(
-                    price_sq,
-                    (PriceSnapshot.symbol == price_sq.c.symbol)
-                    & (PriceSnapshot.recorded_at == price_sq.c.ts),
-                )
+            row.symbol: row for row in session.execute(
+                select(PriceSnapshot).join(price_sq,
+                    (PriceSnapshot.symbol == price_sq.c.symbol) &
+                    (PriceSnapshot.recorded_at == price_sq.c.ts))
             ).scalars().all()
         }
 
@@ -170,20 +205,15 @@ def load_overview() -> pd.DataFrame:
         if score_row is None:
             continue
         price_row = latest_prices.get(symbol)
-
         top_chain, prev_week, prev_month = _parse_chain_data(supply_row.supply_by_chain)
         supply = supply_row.circulating_supply
         price  = price_row.price if price_row else 1.0
-
-        change_7d  = ((supply - prev_week)  / prev_week  * 100) if prev_week  and prev_week  > 0 else None
-        change_30d = ((supply - prev_month) / prev_month * 100) if prev_month and prev_month > 0 else None
-
         rows.append({
             "symbol":            symbol,
             "market_cap":        supply * price,
             "supply":            supply,
-            "change_7d":         change_7d,
-            "change_30d":        change_30d,
+            "change_7d":         ((supply - prev_week)  / prev_week  * 100) if prev_week  and prev_week  > 0 else None,
+            "change_30d":        ((supply - prev_month) / prev_month * 100) if prev_month and prev_month > 0 else None,
             "top_chain":         top_chain,
             "peg_deviation_bps": price_row.peg_deviation_bps if price_row else None,
             "overall_score":     score_row.overall_score,
@@ -202,46 +232,35 @@ def load_latest_scores() -> pd.DataFrame:
     with get_session() as session:
         score_sq = (
             select(RiskScore.symbol, func.max(RiskScore.scored_at).label("scored_at"))
-            .group_by(RiskScore.symbol)
-            .subquery()
+            .group_by(RiskScore.symbol).subquery()
         )
         scores = session.execute(
-            select(RiskScore).join(
-                score_sq,
-                (RiskScore.symbol == score_sq.c.symbol)
-                & (RiskScore.scored_at == score_sq.c.scored_at),
-            )
+            select(RiskScore).join(score_sq,
+                (RiskScore.symbol == score_sq.c.symbol) &
+                (RiskScore.scored_at == score_sq.c.scored_at))
         ).scalars().all()
 
         supply_sq = (
             select(SupplySnapshot.symbol, func.max(SupplySnapshot.recorded_at).label("ts"))
-            .group_by(SupplySnapshot.symbol)
-            .subquery()
+            .group_by(SupplySnapshot.symbol).subquery()
         )
         supplies = {
-            row.symbol: row.circulating_supply
-            for row in session.execute(
-                select(SupplySnapshot).join(
-                    supply_sq,
-                    (SupplySnapshot.symbol == supply_sq.c.symbol)
-                    & (SupplySnapshot.recorded_at == supply_sq.c.ts),
-                )
+            row.symbol: row.circulating_supply for row in session.execute(
+                select(SupplySnapshot).join(supply_sq,
+                    (SupplySnapshot.symbol == supply_sq.c.symbol) &
+                    (SupplySnapshot.recorded_at == supply_sq.c.ts))
             ).scalars().all()
         }
 
         price_sq = (
             select(PriceSnapshot.symbol, func.max(PriceSnapshot.recorded_at).label("ts"))
-            .group_by(PriceSnapshot.symbol)
-            .subquery()
+            .group_by(PriceSnapshot.symbol).subquery()
         )
         prices = {
-            row.symbol: row
-            for row in session.execute(
-                select(PriceSnapshot).join(
-                    price_sq,
-                    (PriceSnapshot.symbol == price_sq.c.symbol)
-                    & (PriceSnapshot.recorded_at == price_sq.c.ts),
-                )
+            row.symbol: row for row in session.execute(
+                select(PriceSnapshot).join(price_sq,
+                    (PriceSnapshot.symbol == price_sq.c.symbol) &
+                    (PriceSnapshot.recorded_at == price_sq.c.ts))
             ).scalars().all()
         }
 
@@ -263,7 +282,6 @@ def load_latest_scores() -> pd.DataFrame:
             "scored_at":          s.scored_at,
             "risk_label":         risk_label(s.overall_score),
         })
-
     return pd.DataFrame(rows)
 
 
@@ -319,7 +337,7 @@ def load_api_usage() -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["provider", "endpoint", "calls", "last_call"])
 
 
-# ── static provider cost table ────────────────────────────────────────────────
+# ── static data ───────────────────────────────────────────────────────────────
 
 PROVIDER_COSTS = pd.DataFrame([
     {"provider": "DefiLlama", "endpoint": "stablecoins",       "frequency": "daily",    "cost_usd": 0.00},
@@ -330,92 +348,164 @@ PROVIDER_COSTS = pd.DataFrame([
 ])
 
 
+# ── styles ────────────────────────────────────────────────────────────────────
+
+def _inject_styles() -> None:
+    st.markdown("""
+<style>
+/* ── Tabs ── */
+.stTabs [data-baseweb="tab-list"] {
+    gap: 0;
+    border-bottom: 2px solid rgba(128,128,128,0.15);
+    margin-bottom: 20px;
+}
+.stTabs [data-baseweb="tab"] {
+    padding: 18px 36px 12px;
+    font-size: 13px;
+    font-weight: 800;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    border-radius: 0;
+    border-bottom: 3px solid transparent;
+    margin-bottom: -2px;
+    justify-content: center;
+}
+.stTabs [aria-selected="true"] {
+    border-bottom: 3px solid #6366f1 !important;
+    color: #6366f1 !important;
+}
+.stTabs [data-baseweb="tab-highlight"],
+.stTabs [data-baseweb="tab-border"] { display: none; }
+
+/* ── Metric cards equal height ── */
+[data-testid="column"] > div { height: 100%; }
+
+/* ── Cleaner expanders ── */
+.streamlit-expanderHeader {
+    font-size: 13px !important;
+    font-weight: 600 !important;
+    color: rgba(128,128,128,0.8) !important;
+}
+
+/* ── Tighter selectbox / slider labels ── */
+.stSelectbox label, .stSlider label {
+    font-size: 12px !important;
+    font-weight: 600 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.06em !important;
+    opacity: 0.6 !important;
+}
+
+/* ── Divider spacing ── */
+hr { margin: 28px 0 !important; opacity: 0.15 !important; }
+</style>
+""", unsafe_allow_html=True)
+
+
+def _stat_card(label: str, value: str, description: str, accent: str) -> str:
+    return (
+        f'<div style="padding:20px 22px; border-radius:10px; height:100%;'
+        f' border:1px solid rgba(128,128,128,0.13); border-top:3px solid {accent};">'
+        f'<div style="font-size:10px; font-weight:800; text-transform:uppercase;'
+        f' letter-spacing:0.1em; color:{C_MUTED}; margin-bottom:10px;">{label}</div>'
+        f'<div style="font-size:30px; font-weight:800; line-height:1; margin-bottom:10px;">{value}</div>'
+        f'<div style="font-size:12px; color:{C_MUTED}; line-height:1.5;">{description}</div>'
+        f'</div>'
+    )
+
+
 # ── page sections ─────────────────────────────────────────────────────────────
 
 def render_header(df: pd.DataFrame) -> None:
-    st.title("Stablecoin Dashboard")
-    st.caption(
-        "A stablecoin is a cryptocurrency designed to maintain a fixed value — "
-        "almost always $1.00 USD. This dashboard tracks their supply, peg stability, "
-        "liquidity, and overall risk across the market."
+    st.markdown(
+        "<h1 style='margin-bottom:2px;'>Stablecoin Dashboard</h1>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"<p style='color:{C_MUTED}; font-size:15px; margin-top:0; margin-bottom:24px;'>"
+        "A stablecoin is a cryptocurrency pegged to $1.00 USD. This dashboard tracks supply, "
+        "peg stability, liquidity, and risk across the market.</p>",
+        unsafe_allow_html=True,
     )
     if df.empty:
         return
-    st.divider()
-    c1, c2, c3, c4 = st.columns(4)
-    total = df["supply"].sum()
-    c1.metric(
+
+    total     = df["supply"].sum()
+    avg_dev   = df["peg_deviation_bps"].dropna().mean() if "peg_deviation_bps" in df.columns else None
+    high_risk = int((df["overall_score"] < 50).sum())
+
+    peg_accent  = C_AMBER if pd.notna(avg_dev) and avg_dev > 10 else C_GREEN
+    risk_accent = C_RED   if high_risk > 0 else C_GREEN
+
+    c1, c2, c3, c4 = st.columns(4, gap="medium")
+    c1.markdown(_stat_card(
         "Total Supply", _fmt_supply(total),
-        help=(
-            "Combined circulating supply of all tracked stablecoins in USD. "
-            "Because each token targets $1.00, this closely approximates total market capitalization."
-        ),
-    )
-    c2.metric(
-        "Assets Tracked", len(df),
-        help="Number of distinct stablecoin assets with risk scores in the database.",
-    )
-    avg_dev = df["peg_deviation_bps"].dropna().mean() if "peg_deviation_bps" in df.columns else None
-    c3.metric(
+        "Combined circulating supply. Because each token targets $1.00, this approximates total market cap.",
+        C_BLUE,
+    ), unsafe_allow_html=True)
+    c2.markdown(_stat_card(
+        "Assets Tracked", str(len(df)),
+        "Distinct stablecoin assets with active risk scores in the database.",
+        C_PRIMARY,
+    ), unsafe_allow_html=True)
+    c3.markdown(_stat_card(
         "Avg Peg Deviation",
         f"{avg_dev:.1f} bps" if pd.notna(avg_dev) else "—",
-        help=(
-            "Average distance from $1.00 across assets with live price data, measured in basis points. "
-            "1 basis point = 0.01 cents. Lower is better."
-        ),
-    )
-    high_risk = int((df["overall_score"] < 50).sum())
-    c4.metric(
-        "High Risk Assets", high_risk,
-        delta_color="inverse",
-        help=(
-            "Assets with an overall risk score below 50 out of 100. "
-            "A low score can indicate a weak peg, thin liquidity, or outdated reserve disclosures."
-        ),
-    )
+        "Average distance from $1.00 with live price data. 1 bps = $0.0001. Amber above 10 bps.",
+        peg_accent,
+    ), unsafe_allow_html=True)
+    c4.markdown(_stat_card(
+        "High Risk Assets", str(high_risk),
+        "Assets scoring below 50 / 100. May signal a weak peg, thin liquidity, or stale reserves.",
+        risk_accent,
+    ), unsafe_allow_html=True)
+
+    st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
 
 
 def render_overview_tab(df: pd.DataFrame) -> None:
-    if df.empty:
-        st.info("No data yet. Run the ingestion pipelines first.")
-        return
-
-    st.markdown(
-        "The table below summarises every tracked stablecoin in one place. "
-        "Click any column header to sort. Use the expander below if you want to understand what each column means."
+    _section_header(
+        "Market Overview",
+        "Every tracked stablecoin at a glance, sorted by circulating supply. "
+        "Click any column header to sort. Risk Level is colour-coded — green is safest, red is most concerning.",
     )
 
-    with st.expander("What do these columns mean?"):
-        st.markdown("""
-| Column | What it measures |
-|---|---|
-| **Market Cap** | Total value of all tokens in circulation. For a $1.00-pegged coin this equals supply. |
-| **Supply** | Number of tokens outstanding, converted to USD at the current price. |
-| **7D / 30D Change** | How much supply grew or shrank over the past 7 or 30 days. Rapid growth suggests rising adoption; a sharp drop may signal redemptions or distress. |
-| **Top Chain** | The blockchain network holding the largest share of this stablecoin's supply (e.g. Ethereum, Tron, BSC). |
-| **Peg Deviation** | How far the market price is from $1.00, in basis points (bps). 1 bps = 0.01 cents. A healthy stablecoin typically stays within 10 bps. |
-| **Risk Score** | A composite score from 0 to 100. Higher is safer. See the Risk Scores tab for the full breakdown. |
-| **Risk Level** | A plain-English label derived from the risk score: Low Risk (80+), Moderate (60–79), Elevated (40–59), High Risk (<40). |
-| **Data Freshness** | How recently the risk score was calculated. Stale scores may not reflect current market conditions. |
-        """)
+    if df.empty:
+        _callout("No data yet. Run the ingestion pipelines first.", "info")
+        return
 
-    st.caption(f"{len(df)} assets · sorted by supply")
+    # Filters row
+    fc1, fc2 = st.columns([2, 1])
+    risk_filter = fc1.selectbox(
+        "Filter by risk level",
+        ["All", "Low Risk", "Moderate", "Elevated", "High Risk"],
+        key="overview_risk_filter",
+    )
+    search = fc2.text_input("Search symbol", placeholder="e.g. USDT", key="overview_search")
 
-    display = df[[
+    filtered = df.copy()
+    if risk_filter != "All":
+        filtered = filtered[filtered["risk_label"] == risk_filter]
+    if search:
+        filtered = filtered[filtered["symbol"].str.upper().str.contains(search.upper())]
+
+    st.caption(f"Showing {len(filtered)} of {len(df)} assets")
+
+    display = filtered[[
         "symbol", "market_cap", "supply",
         "change_7d", "change_30d",
         "top_chain", "peg_deviation_bps",
         "overall_score", "risk_label", "scored_at",
     ]].copy()
 
-    display["market_cap"]        = display["market_cap"].apply(_fmt_supply)
-    display["supply"]            = display["supply"].apply(_fmt_supply)
-    display["change_7d"]         = display["change_7d"].apply(_fmt_pct)
-    display["change_30d"]        = display["change_30d"].apply(_fmt_pct)
+    display["market_cap"]    = display["market_cap"].apply(_fmt_supply)
+    display["supply"]        = display["supply"].apply(_fmt_supply)
+    display["change_7d"]     = display["change_7d"].apply(_fmt_pct)
+    display["change_30d"]    = display["change_30d"].apply(_fmt_pct)
     display["peg_deviation_bps"] = display["peg_deviation_bps"].apply(
         lambda v: f"{v:.1f} bps" if pd.notna(v) else "—"
     )
-    display["overall_score"] = display["overall_score"].apply(lambda v: f"{v:.0f}")
+    display["overall_score"] = display["overall_score"].apply(lambda v: f"{v:.0f} / 100")
     display["scored_at"]     = display["scored_at"].apply(_fmt_freshness)
 
     display.columns = [
@@ -425,162 +515,215 @@ def render_overview_tab(df: pd.DataFrame) -> None:
         "Risk Score", "Risk Level", "Data Freshness",
     ]
 
-    def color_risk_level(val: str) -> str:
+    def _color_risk(val: str) -> str:
         c = RISK_COLORS.get(val, "")
-        return f"color: {c}; font-weight: bold" if c else ""
+        return f"color:{c}; font-weight:700;" if c else ""
 
     st.dataframe(
-        display.style.map(color_risk_level, subset=["Risk Level"]),
+        display.style.map(_color_risk, subset=["Risk Level"]),
         use_container_width=True,
         hide_index=True,
     )
 
+    with st.expander("What does each column mean?"):
+        st.markdown("""
+| Column | What it measures |
+|---|---|
+| **Market Cap** | Total value of all tokens in circulation. For a $1.00-pegged coin this equals supply. |
+| **Supply** | Number of tokens outstanding, converted to USD at the current price. |
+| **7D / 30D Change** | Supply growth or contraction. Rapid growth suggests rising adoption; a sharp drop may signal redemptions or distress. |
+| **Top Chain** | The blockchain holding the largest share of supply (e.g. Ethereum, Tron, BSC). |
+| **Peg Deviation** | Distance from $1.00, in basis points. 1 bps = $0.0001. Healthy coins stay within 10 bps. |
+| **Risk Score** | Composite score 0–100. Higher = safer. Weighted across peg, liquidity, reserves, and adoption. |
+| **Risk Level** | Plain-English label: Low Risk (80+), Moderate (60–79), Elevated (40–59), High Risk (<40). |
+| **Data Freshness** | How recently the risk score was calculated. |
+        """)
+
 
 def render_supply_tab(df: pd.DataFrame) -> None:
-    st.subheader("Circulating Supply")
-    if df.empty:
-        st.info("No supply data yet. Run `python -m pipelines.update_supply`.")
-        return
-
-    st.markdown(
-        "Circulating supply is the total number of stablecoin tokens currently in existence, "
-        "valued in USD. Because each token targets $1.00, supply closely tracks market capitalization — "
-        "a useful proxy for how widely adopted a stablecoin is."
+    _section_header(
+        "Circulating Supply",
+        "How much of each stablecoin exists, valued in USD. "
+        "Because each token targets $1.00, supply is a direct measure of adoption and usage.",
     )
 
-    with st.expander("Why does supply matter?"):
-        st.markdown("""
-**Large, growing supply** generally reflects strong adoption and broad market trust. Tether (USDT)
-and USD Coin (USDC) are the two largest by supply and serve as the backbone of crypto trading.
-
-**Sudden supply drops** can signal a bank-run dynamic — holders redeeming tokens faster than new
-tokens are minted — which sometimes precedes a peg break.
-
-**Supply by chain** shows where users hold the asset. An asset concentrated on a single chain
-carries more platform risk than one distributed across many networks.
-
-**Reading the log-scale chart:** The y-axis uses a logarithmic scale by default so you can compare
-assets that differ by orders of magnitude (e.g., USDT at $110B vs a small stablecoin at $10M).
-Each step up the y-axis represents a 10× increase.
-        """)
+    if df.empty:
+        _callout("No supply data yet. Run <code>python -m pipelines.update_supply</code>.", "info")
+        return
 
     sorted_df = df.sort_values("circulating_supply", ascending=False)
 
-    c1, c2 = st.columns([3, 1])
-    top_n     = c1.slider("Assets to show (by supply)", min_value=5, max_value=50, value=25, step=5, key="supply_top_n")
-    log_scale = c2.checkbox("Log scale", value=True, key="supply_log")
+    # Controls
+    cc1, cc2 = st.columns([4, 1])
+    top_n     = cc1.slider("Assets to show", min_value=5, max_value=50, value=25, step=5, key="supply_top_n")
+    log_scale = cc2.checkbox("Log scale", value=True, key="supply_log",
+                             help="Log scale compresses the range so large and small assets are both visible.")
 
     chart_df = sorted_df.head(top_n)
-    fig = px.bar(
-        chart_df,
-        x="symbol",
-        y="circulating_supply",
-        color="circulating_supply",
-        color_continuous_scale="Blues",
-        labels={"circulating_supply": "Supply (USD)", "symbol": ""},
-        log_y=log_scale,
-    )
-    fig.update_layout(coloraxis_showscale=False, plot_bgcolor="rgba(0,0,0,0)")
-    if not log_scale:
-        fig.update_yaxes(tickprefix="$", tickformat=",.0f")
+    fig = go.Figure(go.Bar(
+        x=chart_df["symbol"],
+        y=chart_df["circulating_supply"],
+        marker=dict(
+            color=chart_df["circulating_supply"],
+            colorscale="Blues",
+            showscale=False,
+        ),
+        hovertemplate="<b>%{x}</b><br>Supply: $%{y:,.0f}<extra></extra>",
+    ))
+    fig.update_layout(**_chart_layout(
+        title=f"Top {top_n} Stablecoins by Circulating Supply",
+        yaxis=dict(
+            type="log" if log_scale else "linear",
+            gridcolor="rgba(128,128,128,0.12)",
+            zeroline=False,
+            title="Supply (USD)",
+        ),
+    ))
     st.plotly_chart(fig, use_container_width=True)
 
-    st.subheader("Supply History")
-    st.caption("How has a single asset's supply changed over the past 30 days?")
-    sym = st.selectbox("Asset", sorted_df["symbol"].tolist(), key="supply_chain_sym")
-    history = load_supply_history(sym, days=30)
-    if not history.empty and len(history) > 1:
-        fig2 = px.area(
-            history,
-            x="recorded_at",
-            y="circulating_supply",
-            labels={"recorded_at": "", "circulating_supply": "Supply (USD)"},
+    if log_scale:
+        _callout(
+            "Log scale is on — each step up the y-axis is a 10× increase. "
+            "Uncheck to see absolute values.",
+            "info",
         )
-        fig2.update_yaxes(tickprefix="$", tickformat=",.0f")
-        fig2.update_layout(plot_bgcolor="rgba(0,0,0,0)")
-        st.plotly_chart(fig2, use_container_width=True)
-    else:
-        st.info("Supply history will appear after multiple pipeline runs.")
+
+    with st.expander("Why does supply matter?"):
+        st.markdown("""
+**Large, growing supply** reflects strong adoption. Tether (USDT) and USD Coin (USDC) are the
+two largest and serve as the backbone of crypto trading.
+
+**Sudden supply drops** can signal a bank-run dynamic — holders redeeming tokens faster than
+new ones are minted — which sometimes precedes a peg break.
+
+**Supply concentration** on a single chain is a platform risk. If that chain has an outage or
+exploit, the stablecoin becomes temporarily unusable.
+        """)
 
     st.divider()
-    display = sorted_df[["symbol", "circulating_supply"]].copy()
-    display["circulating_supply"] = display["circulating_supply"].apply(_fmt_supply)
-    display.columns = ["Symbol", "Circulating Supply"]
-    st.dataframe(display, use_container_width=True, hide_index=True)
+    _section_header(
+        "Supply History",
+        "How one asset's supply has changed over the past 30 days. "
+        "Steady growth is healthy; a cliff-edge drop warrants investigation.",
+    )
+    sym = st.selectbox("Select asset", sorted_df["symbol"].tolist(), key="supply_chain_sym")
+    history = load_supply_history(sym, days=30)
+    if not history.empty and len(history) > 1:
+        fig2 = go.Figure(go.Scatter(
+            x=history["recorded_at"],
+            y=history["circulating_supply"],
+            mode="lines",
+            fill="tozeroy",
+            line=dict(color=C_BLUE, width=2),
+            fillcolor="rgba(59,130,246,0.08)",
+            hovertemplate="<b>%{x}</b><br>Supply: $%{y:,.0f}<extra></extra>",
+        ))
+        fig2.update_layout(**_chart_layout(
+            title=f"{sym} — 30-Day Supply",
+            height=300,
+            yaxis=dict(gridcolor="rgba(128,128,128,0.12)", zeroline=False, tickprefix="$", tickformat=",.0f"),
+        ))
+        st.plotly_chart(fig2, use_container_width=True)
+    else:
+        _callout("Supply history will appear after the pipeline has run on multiple days.", "info")
+
+    st.divider()
+    table = sorted_df[["symbol", "circulating_supply"]].copy()
+    table["circulating_supply"] = table["circulating_supply"].apply(_fmt_supply)
+    table.columns = ["Symbol", "Circulating Supply"]
+    st.dataframe(table, use_container_width=True, hide_index=True)
 
 
 def render_peg_tab(df: pd.DataFrame) -> None:
-    st.subheader("Peg Deviation")
-    if df.empty:
-        st.info("No price data yet. Run `python -m pipelines.update_prices`.")
-        return
-
-    st.markdown(
-        "A stablecoin's core promise is to stay worth exactly $1.00. "
-        "Peg deviation measures how far the current market price has drifted from that target, "
-        "expressed in **basis points (bps)**. Smaller is better — a well-functioning stablecoin "
-        "should rarely exceed 10 bps under normal conditions."
+    _section_header(
+        "Peg Deviation",
+        "How far each stablecoin's price has drifted from $1.00, measured in basis points (bps). "
+        "1 bps = $0.0001. Healthy coins rarely exceed 10 bps.",
     )
 
-    with st.expander("What is a basis point, and what deviation levels should I watch for?"):
-        st.markdown("""
-**1 basis point (bps) = 0.01% = $0.0001**
-
-| Deviation | Dollar value | Interpretation |
-|---|---|---|
-| < 10 bps | < $0.0010 | Normal — within expected noise |
-| 10–50 bps | $0.0010–$0.0050 | Elevated — worth monitoring |
-| 50–100 bps | $0.0050–$0.0100 | Warning — liquidity or confidence stress |
-| > 100 bps | > $0.0100 | Critical — potential peg break |
-
-**Why do stablecoins lose their peg?**
-
-- **Fiat-backed (USDT, USDC):** Concerns about the issuer's solvency or the quality of reserves can
-  trigger sell pressure that pushes the price below $1.00. Strong buy pressure (e.g., during
-  crypto market crashes when people seek safety) can briefly push it above $1.00.
-- **Crypto-backed (DAI):** If the value of the collateral (e.g., ETH) falls sharply, the protocol
-  must liquidate positions to maintain the peg. Extreme volatility can temporarily break it.
-- **Algorithmic:** Rely on supply-and-demand mechanisms rather than held assets. These have historically
-  been the most fragile — the Terra/LUNA collapse in 2022 is the most prominent example.
-        """)
+    if df.empty:
+        _callout("No price data yet. Run <code>python -m pipelines.update_prices</code>.", "info")
+        return
 
     peg_df = df.dropna(subset=["peg_deviation_bps"]).sort_values("peg_deviation_bps", ascending=False)
 
-    fig = px.bar(
-        peg_df,
-        x="symbol",
-        y="peg_deviation_bps",
-        color="peg_deviation_bps",
-        color_continuous_scale="RdYlGn_r",
-        labels={"peg_deviation_bps": "Deviation (bps)", "symbol": ""},
-    )
-    fig.add_hline(y=10, line_dash="dot", line_color="orange", annotation_text="10 bps — elevated")
-    fig.add_hline(y=50, line_dash="dot", line_color="red",    annotation_text="50 bps — warning")
-    fig.update_layout(coloraxis_showscale=False, plot_bgcolor="rgba(0,0,0,0)")
+    # Alert if any asset is critically off-peg
+    critical = peg_df[peg_df["peg_deviation_bps"] > 50]
+    if not critical.empty:
+        names = ", ".join(critical["symbol"].tolist())
+        _callout(f"<strong>Warning:</strong> {names} exceed 50 bps deviation — potential peg stress.", "warning")
+
+    # Colour bars by severity zone
+    def _bar_color(bps: float) -> str:
+        if bps > 50:
+            return C_RED
+        if bps > 10:
+            return C_AMBER
+        return C_GREEN
+
+    colors = peg_df["peg_deviation_bps"].apply(_bar_color).tolist()
+
+    fig = go.Figure(go.Bar(
+        x=peg_df["symbol"],
+        y=peg_df["peg_deviation_bps"],
+        marker_color=colors,
+        hovertemplate="<b>%{x}</b><br>Deviation: %{y:.1f} bps<extra></extra>",
+    ))
+    fig.add_hline(y=10, line_dash="dot", line_color=C_AMBER, line_width=1.5,
+                  annotation_text="10 bps — elevated", annotation_font_size=11)
+    fig.add_hline(y=50, line_dash="dot", line_color=C_RED, line_width=1.5,
+                  annotation_text="50 bps — warning", annotation_font_size=11)
+    fig.update_layout(**_chart_layout(
+        title="Peg Deviation by Asset  (green < 10 bps · amber 10–50 · red > 50)",
+        yaxis=dict(gridcolor="rgba(128,128,128,0.12)", zeroline=False, title="Deviation (bps)"),
+    ))
     st.plotly_chart(fig, use_container_width=True)
 
-    st.subheader("Price History")
-    st.caption("Each data point is one price snapshot. The dashed line marks the $1.00 target.")
-    sym = st.selectbox("Asset", peg_df["symbol"].tolist(), key="peg_sym")
+    with st.expander("What is a basis point, and when should I be concerned?"):
+        st.markdown("""
+**1 basis point (bps) = 0.01% = $0.0001**
+
+| Zone | Deviation | Dollar value | What it means |
+|---|---|---|---|
+| Normal | < 10 bps | < $0.0010 | Within expected market noise |
+| Elevated | 10–50 bps | $0.0010–$0.0050 | Worth monitoring |
+| Warning | 50–100 bps | $0.0050–$0.0100 | Liquidity or confidence stress |
+| Critical | > 100 bps | > $0.0100 | Potential peg break |
+
+**Why do stablecoins lose their peg?**
+- **Fiat-backed (USDT, USDC):** Solvency concerns or high redemption demand.
+- **Crypto-backed (DAI):** Collateral value drops faster than the protocol can liquidate.
+- **Algorithmic:** Supply–demand imbalance. Terra/LUNA (2022) is the most prominent failure.
+        """)
+
+    st.divider()
+    _section_header(
+        "Price History",
+        "Price snapshots for a selected asset over the past 24 hours. "
+        "The dashed line marks the $1.00 target.",
+    )
+    sym = st.selectbox("Select asset", peg_df["symbol"].tolist(), key="peg_sym")
     history = load_price_history(sym, hours=24)
     if not history.empty and len(history) > 1:
         fig2 = go.Figure()
+        fig2.add_hline(y=1.0, line_dash="dash", line_color="rgba(128,128,128,0.4)",
+                       annotation_text="$1.00 target", annotation_font_size=11)
         fig2.add_trace(go.Scatter(
             x=history["recorded_at"],
             y=history["price"],
             mode="lines+markers",
-            name="Price",
-            line=dict(color="#6366f1"),
+            line=dict(color=C_PRIMARY, width=2),
+            marker=dict(size=5),
+            hovertemplate="<b>%{x}</b><br>Price: $%{y:.4f}<extra></extra>",
         ))
-        fig2.add_hline(y=1.0, line_dash="dash", line_color="gray", annotation_text="$1.00 peg")
-        fig2.update_layout(
-            yaxis_title="Price (USD)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            yaxis=dict(tickformat="$.4f"),
-        )
+        fig2.update_layout(**_chart_layout(
+            title=f"{sym} — 24-Hour Price",
+            height=300,
+            yaxis=dict(gridcolor="rgba(128,128,128,0.12)", zeroline=False, tickformat="$.4f"),
+        ))
         st.plotly_chart(fig2, use_container_width=True)
     else:
-        st.info("Price history will appear after multiple pipeline runs.")
+        _callout("Price history will appear after the pipeline has run multiple times.", "info")
 
     st.divider()
     table = peg_df[["symbol", "price", "peg_deviation_bps", "bid_depth_usd", "ask_depth_usd"]].copy()
@@ -589,87 +732,93 @@ def render_peg_tab(df: pd.DataFrame) -> None:
 
 
 def render_risk_tab(df: pd.DataFrame) -> None:
-    st.subheader("Risk Scores")
-    if df.empty:
-        st.info("No scores yet. Run `python -m pipelines.score_stablecoins`.")
-        return
-
-    st.markdown(
-        "Each stablecoin is rated across four dimensions on a scale of 0 to 100. "
-        "**Higher scores indicate lower risk.** The overall score is a weighted average "
-        "designed to surface assets that are stable, liquid, transparent, and widely adopted."
+    _section_header(
+        "Risk Scores",
+        "Each stablecoin is rated 0–100 across four dimensions. "
+        "Higher scores mean lower risk. The overall score is a weighted average.",
     )
 
-    with st.expander("How are the scores calculated?"):
-        st.markdown("""
-| Dimension | Weight | What it measures | How it is scored |
-|---|---|---|---|
-| **Peg Score** | 35% | Closeness to $1.00 | 100 = perfect peg; drops linearly to 0 at 100 bps deviation |
-| **Liquidity Score** | 25% | Order book depth | 100 = $50M+ combined bid/ask depth; 0 = no depth data |
-| **Reserve Score** | 25% | Transparency of backing | Based on how recently the reserve report was published and whether an independent auditor signed off |
-| **Adoption Score** | 15% | Market size | 100 = $5B+ circulating supply; scales linearly from 0 |
-
-**Overall score = Peg × 0.35 + Liquidity × 0.25 + Reserve × 0.25 + Adoption × 0.15**
-
-**Risk levels:**
-- **Low Risk (80–100):** Stable peg, deep liquidity, fresh audited reserves, large market.
-- **Moderate (60–79):** Generally healthy but with one weaker dimension worth watching.
-- **Elevated (40–59):** Meaningful gaps in at least one area — treat with caution.
-- **High Risk (< 40):** Multiple risk factors present. Approach with significant caution.
-
-*Scores are a quantitative starting point, not financial advice. Always read the issuer's disclosures.*
-        """)
+    if df.empty:
+        _callout("No scores yet. Run <code>python -m pipelines.score_stablecoins</code>.", "info")
+        return
 
     sorted_df = df.sort_values("circulating_supply", ascending=False)
 
-    top_n    = st.slider("Assets to show (by supply)", min_value=5, max_value=50, value=20, step=5)
+    # Risk distribution callout
+    counts = sorted_df["risk_label"].value_counts()
+    dist_parts = [f"<strong style='color:{RISK_COLORS[k]}'>{v} {k}</strong>"
+                  for k, v in counts.items() if k in RISK_COLORS]
+    if dist_parts:
+        _callout("Distribution: " + " · ".join(dist_parts), "info")
+
+    top_n    = st.slider("Assets to show (by supply)", min_value=5, max_value=50, value=15, step=5)
     chart_df = sorted_df.head(top_n).sort_values("overall_score", ascending=False)
 
+    # Horizontal grouped bar — much easier to read with many assets
     fig = go.Figure()
-    for col, color in zip(SCORE_COLS, SCORE_COLORS):
+    for col, label, color in zip(SCORE_COLS, SCORE_LABELS, SCORE_COLORS):
         fig.add_trace(go.Bar(
-            name=col.replace("_", " ").title(),
-            x=chart_df["symbol"],
-            y=chart_df[col],
+            name=label,
+            y=chart_df["symbol"],
+            x=chart_df[col],
+            orientation="h",
             marker_color=color,
+            hovertemplate=f"<b>%{{y}}</b><br>{label}: %{{x:.0f}}<extra></extra>",
         ))
-    fig.update_layout(
+    fig.update_layout(**_chart_layout(
+        title=f"Top {top_n} Assets — Score Breakdown (higher = safer)",
+        height=max(380, top_n * 28),
         barmode="group",
-        yaxis=dict(range=[0, 100], title="Score (0 = highest risk, 100 = lowest risk)"),
-        plot_bgcolor="rgba(0,0,0,0)",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02),
-        height=420,
-    )
+        xaxis=dict(range=[0, 100], title="Score", gridcolor="rgba(128,128,128,0.12)", zeroline=False),
+        yaxis=dict(gridcolor="rgba(0,0,0,0)", zeroline=False, autorange="reversed"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0),
+        margin={"t": 56, "r": 16, "b": 40, "l": 80},
+    ))
     st.plotly_chart(fig, use_container_width=True)
 
-    st.subheader("Score History")
-    st.caption(
-        "Track how an asset's scores change over time. A declining peg or liquidity score "
-        "can be an early warning sign before a larger problem emerges."
+    with st.expander("How are scores calculated?"):
+        st.markdown("""
+| Dimension | Weight | How it is scored |
+|---|---|---|
+| **Peg** | 35% | 100 = perfect $1.00; drops to 0 at 100 bps deviation |
+| **Liquidity** | 25% | 100 = $50M+ combined bid/ask order book depth |
+| **Reserve** | 25% | Based on report age and whether an independent auditor signed off |
+| **Adoption** | 15% | 100 = $5B+ circulating supply; scales linearly |
+
+**Overall = Peg × 0.35 + Liquidity × 0.25 + Reserve × 0.25 + Adoption × 0.15**
+
+Risk levels: **Low Risk** 80+  ·  **Moderate** 60–79  ·  **Elevated** 40–59  ·  **High Risk** < 40
+
+*Scores are a quantitative starting point, not financial advice.*
+        """)
+
+    st.divider()
+    _section_header(
+        "Score History",
+        "How an asset's scores have changed over the past 30 days. "
+        "A declining peg or liquidity score can be an early warning sign.",
     )
-    all_syms = sorted_df["symbol"].tolist()
-    sym      = st.selectbox("Asset", all_syms, key="risk_history_sym")
-    history  = load_score_history(sym, days=30)
+    sym     = st.selectbox("Select asset", sorted_df["symbol"].tolist(), key="risk_history_sym")
+    history = load_score_history(sym, days=30)
     if not history.empty and len(history) > 1:
         fig2 = go.Figure()
         line_styles = ["solid", "dash", "dot", "dashdot"]
-        for col, color, dash in zip(SCORE_COLS, SCORE_COLORS, line_styles):
+        for col, label, color, dash in zip(SCORE_COLS, SCORE_LABELS, SCORE_COLORS, line_styles):
             fig2.add_trace(go.Scatter(
-                x=history["scored_at"],
-                y=history[col],
-                name=col.replace("_", " ").title(),
-                mode="lines",
-                line=dict(color=color, dash=dash),
+                x=history["scored_at"], y=history[col],
+                name=label, mode="lines",
+                line=dict(color=color, dash=dash, width=2),
+                hovertemplate=f"<b>%{{x}}</b><br>{label}: %{{y:.0f}}<extra></extra>",
             ))
-        fig2.update_layout(
-            yaxis=dict(range=[0, 100], title="Score"),
-            plot_bgcolor="rgba(0,0,0,0)",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02),
-            height=350,
-        )
+        fig2.update_layout(**_chart_layout(
+            title=f"{sym} — Score History (30 days)",
+            height=320,
+            yaxis=dict(range=[0, 100], title="Score", gridcolor="rgba(128,128,128,0.12)", zeroline=False),
+            legend=dict(orientation="h", yanchor="bottom", y=1.01),
+        ))
         st.plotly_chart(fig2, use_container_width=True)
     else:
-        st.info("Score history will appear after multiple pipeline runs.")
+        _callout("Score history will appear after the pipeline has run on multiple days.", "info")
 
     st.divider()
     display = sorted_df.head(top_n).sort_values("overall_score", ascending=False)[[
@@ -678,36 +827,47 @@ def render_risk_tab(df: pd.DataFrame) -> None:
     ]].copy()
     display.columns = ["Symbol", "Overall", "Risk Level", "Peg", "Liquidity", "Reserve", "Adoption"]
 
-    def color_risk(val: str) -> str:
+    def _color_risk(val: str) -> str:
         c = RISK_COLORS.get(val, "")
-        return f"color: {c}; font-weight: bold" if c else ""
+        return f"color:{c}; font-weight:700;" if c else ""
 
     st.dataframe(
-        display.style.map(color_risk, subset=["Risk Level"]),
+        display.style.map(_color_risk, subset=["Risk Level"]),
         use_container_width=True,
         hide_index=True,
     )
 
 
 def render_api_tab() -> None:
-    st.subheader("Provider Cost Table")
+    _section_header(
+        "API Usage",
+        "All data is sourced from free public APIs. No paid tier is used.",
+    )
     st.dataframe(PROVIDER_COSTS, use_container_width=True, hide_index=True)
 
-    st.subheader("Live API Usage")
+    st.divider()
+    st.markdown("##### Live call log")
     usage_df = load_api_usage()
     if usage_df.empty:
-        st.info("No API calls logged yet.")
+        _callout("No API calls logged yet.", "info")
     else:
         st.dataframe(usage_df, use_container_width=True, hide_index=True)
 
-        fig = px.bar(
-            usage_df,
-            x="endpoint",
-            y="calls",
-            color="provider",
-            labels={"calls": "Total Calls", "endpoint": ""},
-        )
-        fig.update_layout(plot_bgcolor="rgba(0,0,0,0)")
+        fig = go.Figure()
+        for provider in usage_df["provider"].unique():
+            sub = usage_df[usage_df["provider"] == provider]
+            fig.add_trace(go.Bar(
+                name=provider,
+                x=sub["endpoint"],
+                y=sub["calls"],
+                hovertemplate="<b>%{x}</b><br>Calls: %{y}<extra></extra>",
+            ))
+        fig.update_layout(**_chart_layout(
+            title="Total API Calls by Endpoint",
+            height=300,
+            barmode="group",
+            yaxis=dict(title="Calls", gridcolor="rgba(128,128,128,0.12)", zeroline=False),
+        ))
         st.plotly_chart(fig, use_container_width=True)
 
 
@@ -715,6 +875,7 @@ def render_api_tab() -> None:
 
 def main() -> None:
     init_db()
+    _inject_styles()
 
     overview_df = load_overview()
     scores_df   = load_latest_scores()
@@ -731,30 +892,25 @@ def main() -> None:
 
     with tab_overview:
         render_overview_tab(overview_df)
-
     with tab_supply:
         render_supply_tab(scores_df)
-
     with tab_peg:
         render_peg_tab(scores_df)
-
     with tab_risk:
         render_risk_tab(scores_df)
-
     with tab_api:
         render_api_tab()
 
     st.sidebar.markdown("---")
     st.sidebar.caption(f"Data as of {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC")
-
     st.sidebar.markdown("---")
     st.sidebar.subheader("Manual Refresh")
     pwd = st.sidebar.text_input("Password", type="password", key="refresh_pwd")
-    if st.sidebar.button("Refresh Data"):
+    if st.sidebar.button("Refresh Data", use_container_width=True):
         if pwd == "2026":
             import core.cache as _api_cache
-            import pipelines.update_supply as _supply
-            import pipelines.update_prices as _prices
+            import pipelines.update_supply   as _supply
+            import pipelines.update_prices   as _prices
             import pipelines.update_reserves as _reserves
             import pipelines.score_stablecoins as _scores
             all_ok = True
@@ -763,18 +919,14 @@ def main() -> None:
                     st.write("Fetching supply...")
                     _api_cache.clear("defillama")
                     _supply.run()
-
                     st.write("Fetching prices...")
                     _api_cache.clear("binance")
                     _api_cache.clear("coinbase")
                     _prices.run()
-
                     st.write("Updating reserves...")
                     _reserves.run()
-
                     st.write("Scoring...")
                     _scores.run()
-
                     status.update(label="Done!", state="complete")
                 except Exception as exc:
                     all_ok = False
@@ -784,6 +936,13 @@ def main() -> None:
                 st.rerun()
         else:
             st.sidebar.error("Incorrect password")
+
+    st.sidebar.markdown(
+        "<p style='font-size:11px; color:rgba(128,128,128,0.5); margin-top:32px;'>"
+        "Data sourced from DefiLlama, Binance, and Coinbase public APIs. "
+        "Not financial advice.</p>",
+        unsafe_allow_html=True,
+    )
 
 
 if __name__ == "__main__":
