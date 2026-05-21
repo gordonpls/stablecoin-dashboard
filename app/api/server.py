@@ -143,6 +143,35 @@ def pipeline_runs(
     }
 
 
+@app.get("/data-quality")
+def data_quality(
+    symbol: str | None = Query(default=None),
+    severity: str | None = Query(default=None),
+    warning_type: str | None = Query(default=None),
+    active_only: bool = Query(default=True),
+    limit: int = Query(default=200, le=500),
+) -> dict:
+    """Data-quality warnings plus an active-warning summary.
+
+    ``summary`` reports the active-warning total with breakdowns by severity and
+    type; ``warnings`` is the newest-first list, by default only active
+    (unresolved) warnings. Filter by ``symbol``, ``severity`` (low/medium/high),
+    and ``warning_type`` (IMPOSSIBLE_PRICE, NON_POSITIVE_SUPPLY,
+    PEG_DEVIATION_MISMATCH, SUPPLY_JUMP, DUPLICATE_SNAPSHOT,
+    MISSING_CHAIN_DISTRIBUTION); pass ``active_only=false`` to include resolved
+    history. Always returns a structured object, even on a brand-new database.
+    """
+    from services.data_validation import query_warnings, warning_summary
+
+    return {
+        "summary": warning_summary(),
+        "warnings": query_warnings(
+            symbol=symbol, severity=severity, warning_type=warning_type,
+            active_only=active_only, limit=limit,
+        ),
+    }
+
+
 @app.get("/data-freshness")
 def data_freshness() -> dict:
     """System-wide freshness per data source and per provider.

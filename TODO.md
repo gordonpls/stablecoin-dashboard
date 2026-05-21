@@ -656,7 +656,37 @@ CREATE TABLE pipeline_runs (
 
 ---
 
-## 13. Add Data Validation Rules
+## 13. Add Data Validation Rules  (DONE 2026-05-21)
+
+Implemented as a `data_quality_warnings` table (`db/models.py`
+`DataQualityWarning`, `db/schema.sql`) plus `services/data_validation.py`.
+`run_validation()` detects six warning types — `IMPOSSIBLE_PRICE` (price outside
+[0.90, 1.10]), `NON_POSITIVE_SUPPLY`, `PEG_DEVIATION_MISMATCH` (stored
+`peg_deviation_bps` disagrees with `|price-1|*10_000`), `SUPPLY_JUMP` (≥50%
+single-interval move — a data error, set well above the 5–10% SUPPLY_SHOCK
+risk-event band so the two surfaces don't double-flag normal moves),
+`DUPLICATE_SNAPSHOT` (the documented DefiLlama ticker collision), and
+`MISSING_CHAIN_DISTRIBUTION` — and is auto-called (best-effort) at the end of
+the scoring pipeline. Warnings have a lifecycle: a row opens (`resolved_at`
+NULL) when first detected and resolves on the first run where the data no
+longer trips the rule; identity is `(symbol, metric_name, warning_type)` among
+open rows, so re-running is idempotent. Exposed via `GET /data-quality`
+(active-warning `summary` + filterable `warnings`, `active_only` toggle for
+history) and surfaced as a "Data Quality" panel in the API Usage tab (severity
+pills, headline callout, severity-sorted detail table). Tests in
+`tests/test_data_validation.py`.
+
+Remaining / follow-ups:
+- Wire active warnings into the Asset Profile page and add a stale/duplicate
+  badge in the Overview table, so users see data caveats next to the figures
+  themselves rather than only in the API Usage tab.
+- Warning `message`/`severity` are captured at open time and not refreshed
+  while the warning stays open (e.g. a price that drifts further out of band);
+  refreshing the open row on each run would keep the detail current.
+- Per-symbol staleness validation ("latest data newer than expected cadence",
+  from the original spec) was intentionally left to `services/freshness.py` to
+  avoid duplicating the system-wide freshness panel; revisit if a *per-asset*
+  staleness signal proves useful.
 
 ### Objective
 
@@ -912,10 +942,10 @@ These are the highest-value next tasks for an AI coding agent:
 2. ~~Implement stablecoin profile pages.~~ (DONE 2026-05-21)
 3. ~~Add metric-level freshness and confidence indicators.~~ (DONE 2026-05-21 — `/data-freshness` + Data Freshness panel)
 4. ~~Add `pipeline_runs` table and job run history UI.~~ (DONE 2026-05-21 — `/pipeline-runs` + Pipeline Runs panel)
-5. Add data validation warnings.
+5. ~~Add data validation warnings.~~ (DONE 2026-05-21 — `/data-quality` + Data Quality panel)
 6. Add provider fallback status visibility.
 7. Add explainable score drilldowns.
-8. Add risk events timeline.
+8. ~~Add risk events timeline.~~ (DONE 2026-05-21)
 9. Add chain concentration risk.
 10. Add stablecoin dominance and market share.
 

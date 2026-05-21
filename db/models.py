@@ -136,6 +136,38 @@ class RiskEvent(Base):
         return {c.key: getattr(self, c.key) for c in self.__table__.columns}
 
 
+class DataQualityWarning(Base):
+    """A detected data-integrity problem with the stored metrics.
+
+    Distinct from ``RiskEvent`` (which marks *market* moves like a peg break):
+    these flag data that looks *wrong, implausible, or incomplete* — an
+    out-of-band stablecoin price, non-positive supply, a peg_deviation_bps that
+    is inconsistent with its price, an implausible supply jump, ticker-collision
+    duplicate snapshots, or missing chain distribution.
+
+    Warnings have a lifecycle: a row is opened (``resolved_at`` NULL) when a
+    problem is first detected and closed (``resolved_at`` set) once the
+    underlying data no longer trips the rule. Identity is
+    (symbol, metric_name, warning_type) among the currently-open rows, so
+    re-running detection over an unchanged problem is a no-op.
+    """
+
+    __tablename__ = "data_quality_warnings"
+
+    id           = Column(Integer, primary_key=True, autoincrement=True)
+    symbol       = Column(String)                       # null for non-asset warnings
+    provider     = Column(String)
+    metric_name  = Column(String, nullable=False)
+    warning_type = Column(String, nullable=False)        # IMPOSSIBLE_PRICE, ...
+    severity     = Column(String, nullable=False)        # low | medium | high
+    message      = Column(Text, nullable=False)
+    detected_at  = Column(DateTime, nullable=False)
+    resolved_at  = Column(DateTime)                      # null while the warning is active
+
+    def to_dict(self) -> dict:
+        return {c.key: getattr(self, c.key) for c in self.__table__.columns}
+
+
 class ApiRequestLog(Base):
     __tablename__ = "api_request_log"
 

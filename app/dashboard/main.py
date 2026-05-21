@@ -410,6 +410,16 @@ def load_pipeline_runs(limit: int = 100) -> dict:
     }
 
 
+@st.cache_data(ttl=120, show_spinner=False)
+def load_data_quality(limit: int = 200) -> dict:
+    from services.data_validation import query_warnings, warning_summary
+
+    return {
+        "summary": warning_summary(),
+        "warnings": query_warnings(limit=limit),
+    }
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def load_api_usage() -> pd.DataFrame:
     with get_session() as session:
@@ -573,6 +583,15 @@ EVENT_TYPE_LABELS = {
     "SCORE_CHANGE":   "Score Change",
     "RESERVE_STALE":  "Reserve Stale",
     "API_FAILURE":    "API Failure",
+}
+
+WARNING_TYPE_LABELS = {
+    "IMPOSSIBLE_PRICE":           "Impossible Price",
+    "NON_POSITIVE_SUPPLY":        "Non-Positive Supply",
+    "PEG_DEVIATION_MISMATCH":     "Peg Deviation Mismatch",
+    "SUPPLY_JUMP":                "Implausible Supply Jump",
+    "DUPLICATE_SNAPSHOT":         "Duplicate Snapshot",
+    "MISSING_CHAIN_DISTRIBUTION": "Missing Chain Data",
 }
 
 
@@ -1733,10 +1752,91 @@ def render_pipeline_runs(data: dict) -> None:
     st.divider()
 
 
+def render_data_quality(data: dict) -> None:
+    _section_header(
+        "Data Quality",
+        "Automated integrity checks on the stored data — impossible prices, "
+        "non-positive supply, peg figures that disagree with price, implausible "
+        "supply jumps, ticker-collision duplicates, and missing chain breakdowns. "
+        "Active warnings clear automatically once the underlying data is fixed.",
+    )
+
+    summary = data.get("summary", {})
+    warnings = data.get("warnings", [])
+    total = summary.get("active_total", 0)
+
+    if not warnings:
+        _callout(
+            "No active data-quality warnings — all stored metrics pass the "
+            "validation rules. Checks run automatically each time the scoring "
+            "pipeline executes.",
+            "info",
+        )
+        st.divider()
+        return
+
+    by_sev = summary.get("by_severity", {})
+    high, medium, low = by_sev.get("high", 0), by_sev.get("medium", 0), by_sev.get("low", 0)
+    kind = "danger" if high else "warning"
+    parts = [f"{n} {label}" for n, label in
+             ((high, "high"), (medium, "medium"), (low, "low")) if n]
+    breakdown = ", ".join(parts)
+    noun = "warning" if total == 1 else "warnings"
+    _callout(
+        f"<strong>{total} active data-quality {noun}</strong>"
+        + (f" ({breakdown}). " if breakdown else ". ")
+        + "Figures derived from the affected metrics may be unreliable until resolved.",
+        kind,
+    )
+
+    # Severity pills.
+    chips = []
+    for sev, n in (("high", high), ("medium", medium), ("low", low)):
+        color = SEVERITY_COLORS.get(sev, C_MUTED)
+        chips.append(
+            f"<span style='display:inline-flex; align-items:center; gap:7px; "
+            f"padding:6px 12px; margin:0 8px 8px 0; border-radius:999px; "
+            f"border:1px solid rgba(128,128,128,0.18); font-size:12px;'>"
+            f"<span style='width:8px;height:8px;border-radius:50%;background:{color};'></span>"
+            f"<span style='color:{C_MUTED};'>{sev.capitalize()}</span>"
+            f"<span style='font-weight:700;color:{color};'>{n}</span>"
+            f"</span>"
+        )
+    st.markdown("<div style='margin-bottom:14px;'>" + "".join(chips) + "</div>", unsafe_allow_html=True)
+
+    sev_rank = {"high": 0, "medium": 1, "low": 2}
+    ordered = sorted(warnings, key=lambda w: sev_rank.get(w.get("severity"), 9))
+    table = pd.DataFrame([
+        {
+            "Severity": w.get("severity", "").capitalize(),
+            "Type":     WARNING_TYPE_LABELS.get(w.get("warning_type"), w.get("warning_type")),
+            "Asset":    w.get("symbol") or "—",
+            "Metric":   w.get("metric_name") or "—",
+            "Detected": _fmt_event_time(w.get("detected_at")),
+            "Detail":   w.get("message") or "",
+        }
+        for w in ordered
+    ])
+
+    def _color_sev(val: str) -> str:
+        c = SEVERITY_COLORS.get(val.lower(), "")
+        return f"color:{c}; font-weight:700;" if c else ""
+
+    st.dataframe(
+        table.style.map(_color_sev, subset=["Severity"]),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.divider()
+
+
 def render_api_tab() -> None:
     render_data_freshness(load_data_freshness())
 
     render_pipeline_runs(load_pipeline_runs())
+
+    render_data_quality(load_data_quality())
 
     _section_header(
         "API Usage",

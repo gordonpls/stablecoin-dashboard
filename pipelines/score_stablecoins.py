@@ -121,6 +121,19 @@ def _run_scoring(rec) -> None:
     except Exception as exc:  # noqa: BLE001 - detection is non-critical
         logger.warning("risk_event_detection_failed error=%s", exc)
 
+    # Validate the stored data and open/resolve data-quality warnings. Also
+    # best-effort: a validation bug must never fail the scoring run.
+    try:
+        from services.data_validation import run_validation
+
+        result = run_validation(now=now)
+        logger.info(
+            "data_validation_complete opened=%d resolved=%d",
+            len(result["opened"]), len(result["resolved"]),
+        )
+    except Exception as exc:  # noqa: BLE001 - validation is non-critical
+        logger.warning("data_validation_failed error=%s", exc)
+
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)

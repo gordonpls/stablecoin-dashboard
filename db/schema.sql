@@ -78,6 +78,24 @@ CREATE INDEX IF NOT EXISTS idx_risk_events_time
 CREATE INDEX IF NOT EXISTS idx_risk_events_symbol_time
     ON risk_events(symbol, triggered_at DESC);
 
+CREATE TABLE IF NOT EXISTS data_quality_warnings (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol       TEXT,                  -- stablecoin ticker, or NULL for non-asset warnings
+    provider     TEXT,
+    metric_name  TEXT NOT NULL,
+    warning_type TEXT NOT NULL,         -- IMPOSSIBLE_PRICE | NON_POSITIVE_SUPPLY | PEG_DEVIATION_MISMATCH | SUPPLY_JUMP | DUPLICATE_SNAPSHOT | MISSING_CHAIN_DISTRIBUTION
+    severity     TEXT NOT NULL,         -- low | medium | high
+    message      TEXT NOT NULL,
+    detected_at  TIMESTAMP NOT NULL,
+    resolved_at  TIMESTAMP              -- NULL while the warning is active
+);
+
+CREATE INDEX IF NOT EXISTS idx_dq_warnings_active
+    ON data_quality_warnings(resolved_at, detected_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_dq_warnings_symbol
+    ON data_quality_warnings(symbol, warning_type);
+
 CREATE TABLE IF NOT EXISTS api_request_log (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     provider     TEXT NOT NULL,
