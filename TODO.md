@@ -333,7 +333,30 @@ CREATE TABLE risk_events (
 
 ---
 
-## 5. Add Explainable Score Drilldowns
+## 5. Add Explainable Score Drilldowns  (DONE 2026-05-21)
+
+Implemented in `services/score_explanation.py` (`explain_scores`), exposed via
+`GET /stablecoins/{symbol}/score-explanation`, and surfaced both in the Risk
+Scores tab ("Why does {asset} score what it does?" drilldown, reusing the score-
+history asset selector) and on the Asset Profile score breakdown. For the latest
+stored `RiskScore` it returns, per dimension: the raw inputs that drove it (peg
+deviation, bid/ask depth, reserve age + auditor, circulating supply, each with
+its own snapshot timestamp), the weight, the points it contributes to the
+overall, and a plain-language formula/detail. It identifies the **weakest**
+dimension by weighted points lost vs a perfect 100 (not raw min), and explains
+the **delta** versus the prior snapshot in prose (e.g. "USDT overall score fell
+from 86 to 79 because liquidity depth fell and peg deviation widened"). Weights
+were extracted to a single `SCORE_WEIGHTS` constant in
+`pipelines/score_stablecoins.py` so the drilldown can never disagree with the
+pipeline. Missing inputs are shown explicitly (neutral-default notes). Tests in
+`tests/test_score_explanation.py`.
+
+Remaining / follow-ups:
+- The narrative compares consecutive 10-minute snapshots; a 24h comparison
+  window (matching Market Changes / the SCORE_CHANGE risk event) may read more
+  intuitively for "what changed today".
+- Score-delta `risk_events` (#4 SCORE_CHANGE) and this narrative now overlap;
+  consider sourcing the profile's "Latest alerts" from one of them.
 
 ### Objective
 
@@ -944,7 +967,7 @@ These are the highest-value next tasks for an AI coding agent:
 4. ~~Add `pipeline_runs` table and job run history UI.~~ (DONE 2026-05-21 — `/pipeline-runs` + Pipeline Runs panel)
 5. ~~Add data validation warnings.~~ (DONE 2026-05-21 — `/data-quality` + Data Quality panel)
 6. Add provider fallback status visibility.
-7. Add explainable score drilldowns.
+7. ~~Add explainable score drilldowns.~~ (DONE 2026-05-21 — `/stablecoins/{symbol}/score-explanation` + Risk Scores / Profile drilldown)
 8. ~~Add risk events timeline.~~ (DONE 2026-05-21)
 9. Add chain concentration risk.
 10. Add stablecoin dominance and market share.

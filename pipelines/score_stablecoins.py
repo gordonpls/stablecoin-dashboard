@@ -18,6 +18,16 @@ MAX_PEG_DEVIATION_BPS = 100           # 100 bps = score 0
 MAX_LIQUIDITY_USD = 50_000_000        # $50M depth = max score
 STALE_RESERVE_DAYS = 90
 
+# Weight of each dimension in the overall score. Single source of truth shared
+# with services.score_explanation so the drilldown can never disagree with how
+# the pipeline actually combines the dimensions. Must sum to 1.0.
+SCORE_WEIGHTS: dict[str, float] = {
+    "peg":       0.35,
+    "liquidity": 0.25,
+    "reserve":   0.25,
+    "adoption":  0.15,
+}
+
 
 def _peg_score(deviation_bps: float | None) -> float:
     if deviation_bps is None:
@@ -93,7 +103,13 @@ def _run_scoring(rec) -> None:
             )
             reserve = _reserve_score(reserve_row)
             adoption = _adoption_score(supply_row.circulating_supply if supply_row else None)
-            overall = round((peg * 0.35 + liquidity * 0.25 + reserve * 0.25 + adoption * 0.15), 2)
+            overall = round(
+                peg * SCORE_WEIGHTS["peg"]
+                + liquidity * SCORE_WEIGHTS["liquidity"]
+                + reserve * SCORE_WEIGHTS["reserve"]
+                + adoption * SCORE_WEIGHTS["adoption"],
+                2,
+            )
 
             scores.append(RiskScore(
                 symbol=symbol,

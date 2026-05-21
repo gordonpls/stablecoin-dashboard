@@ -93,6 +93,22 @@ def get_stablecoin_events(symbol: str, limit: int = Query(default=100, le=500)) 
     return query_events(symbol=symbol, limit=limit)
 
 
+@app.get("/stablecoins/{symbol}/score-explanation")
+def get_score_explanation(symbol: str) -> dict:
+    """Explain why an asset has its latest risk score.
+
+    Returns a per-dimension drilldown (inputs, weights, point contributions),
+    the dimension dragging the score down most, and a plain-language delta
+    versus the prior snapshot. 404 only when the asset has no risk score yet.
+    """
+    from services.score_explanation import explain_scores
+
+    explanation = explain_scores(symbol)
+    if explanation is None:
+        raise HTTPException(status_code=404, detail=f"No scores for {symbol}")
+    return explanation
+
+
 @app.get("/stablecoins/{symbol}/profile")
 def get_profile(symbol: str) -> dict:
     """Complete per-asset profile: price, supply, chains, scores, reserve, freshness.

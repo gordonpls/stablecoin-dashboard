@@ -373,6 +373,13 @@ def load_score_history(symbol: str, days: int = 30) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=120, show_spinner=False)
+def load_score_explanation(symbol: str) -> dict | None:
+    from services.score_explanation import explain_scores
+
+    return explain_scores(symbol)
+
+
+@st.cache_data(ttl=120, show_spinner=False)
 def load_market_changes(limit: int = 30) -> list[dict]:
     from services.market_changes import compute_market_changes
 
@@ -885,11 +892,26 @@ def render_profile(symbol: str) -> None:
             margin={"t": 20, "r": 16, "b": 40, "l": 90},
         ))
         st.plotly_chart(fig, use_container_width=True)
-        present = [(lbl, v) for lbl, v in zip(SCORE_LABELS, vals) if v is not None]
-        if present:
-            weakest = min(present, key=lambda t: t[1])
-            _callout(f"Lowest dimension: <strong>{weakest[0]}</strong> at {weakest[1]:.0f} / 100 — "
-                     "the biggest drag on the overall score.", "info")
+        explanation = load_score_explanation(symbol)
+        if explanation:
+            if explanation.get("weakest_explanation"):
+                _callout(
+                    explanation["weakest_explanation"],
+                    "warning" if explanation.get("weakest_component") else "info",
+                )
+            delta = explanation.get("delta") or {}
+            if delta.get("summary") and delta.get("available"):
+                change = delta.get("overall_change")
+                _callout(
+                    f"<strong>Since the last snapshot:</strong> {delta['summary']}",
+                    "danger" if (change is not None and change < 0) else "info",
+                )
+        else:
+            present = [(lbl, v) for lbl, v in zip(SCORE_LABELS, vals) if v is not None]
+            if present:
+                weakest = min(present, key=lambda t: t[1])
+                _callout(f"Lowest dimension: <strong>{weakest[0]}</strong> at {weakest[1]:.0f} / 100 — "
+                         "the biggest drag on the overall score.", "info")
     else:
         _section_header("Risk Score Breakdown", "Risk scores have not been computed for this asset yet.")
         _callout("No risk score available.", "info")
@@ -1308,6 +1330,73 @@ def render_peg_tab(df: pd.DataFrame) -> None:
     st.dataframe(table, use_container_width=True, hide_index=True)
 
 
+def _score_accent(score: float | None) -> str:
+    """Colour a 0–100 dimension score on the same bands as the risk label."""
+    if score is None:
+        return C_MUTED
+    if score >= 80:
+        return C_GREEN
+    if score >= 60:
+        return C_AMBER
+    if score >= 40:
+        return C_ORANGE
+    return C_RED
+
+
+def render_score_explanation(symbol: str) -> None:
+    """Explain *why* one asset has its score: inputs, weights, drag, and delta.
+
+    Shared between the Risk Scores tab and the Asset Profile page so the
+    drilldown reads identically wherever a user lands.
+    """
+    explanation = load_score_explanation(symbol)
+    if explanation is None:
+        _callout(f"No risk score for <strong>{symbol}</strong> yet.", "info")
+        return
+
+    overall = explanation.get("overall_score")
+    _callout(
+        f"<strong>{symbol}</strong> overall score is "
+        f"<strong>{overall:.0f} / 100</strong> ({explanation.get('risk_label', '—')}) — "
+        "a weighted blend of the four dimensions below. Higher is safer.",
+        "info",
+    )
+
+    # Per-dimension cards: score, weight, point contribution, and what drove it.
+    components = explanation.get("components", [])
+    weakest = explanation.get("weakest_component")
+    cols = st.columns(len(components), gap="medium") if components else []
+    for col, comp in zip(cols, components):
+        flag = " ⚠️" if comp["key"] == weakest else ""
+        desc = (
+            f"{comp['weight_pct']:.0f}% weight · contributes "
+            f"{comp['weighted_contribution']:.1f} pts to the overall.<br>"
+            f"<span style='opacity:0.85;'>{comp['detail']}</span>"
+        )
+        col.markdown(
+            _stat_card(
+                comp["label"] + flag,
+                f"{comp['score']:.0f}/100",
+                desc,
+                _score_accent(comp["score"]),
+            ),
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("<div style='margin-top:18px;'></div>", unsafe_allow_html=True)
+
+    if explanation.get("weakest_explanation"):
+        _callout(explanation["weakest_explanation"], "warning" if weakest else "info")
+
+    delta = explanation.get("delta") or {}
+    if delta.get("summary"):
+        change = delta.get("overall_change")
+        kind = "info"
+        if change is not None and delta.get("available"):
+            kind = "danger" if change < 0 else "info"
+        _callout(f"<strong>Since the last snapshot:</strong> {delta['summary']}", kind)
+
+
 def render_risk_tab(df: pd.DataFrame) -> None:
     _section_header(
         "Risk Scores",
@@ -1396,6 +1485,14 @@ Risk levels: **Low Risk** 80+  ·  **Moderate** 60–79  ·  **Elevated** 40–5
         st.plotly_chart(fig2, use_container_width=True)
     else:
         _callout("Score history will appear after the pipeline has run on multiple days.", "info")
+
+    st.divider()
+    _section_header(
+        f"Why does {sym} score what it does?",
+        "The inputs behind each dimension, how many points each contributes, "
+        "what is dragging the score down most, and how it moved since the last snapshot.",
+    )
+    render_score_explanation(sym)
 
     st.divider()
     display = sorted_df.head(top_n).sort_values("overall_score", ascending=False)[[
