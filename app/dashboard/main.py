@@ -150,7 +150,9 @@ def _fmt_pct(v: float | None) -> str:
 
 
 def _fmt_freshness(scored_at: datetime | None) -> str:
-    if scored_at is None:
+    # Guard against pandas NaT/NaN as well as None — a DataFrame column mixing
+    # timestamps and missing values coerces the gaps to NaT, not None.
+    if scored_at is None or pd.isna(scored_at):
         return "—"
     delta = datetime.utcnow() - scored_at
     mins  = int(delta.total_seconds() / 60)
@@ -287,6 +289,9 @@ def load_overview() -> pd.DataFrame:
             "risk_label":        risk_label(score_row.overall_score),
             "regime":            regime_row["regime"] if regime_row else "—",
             "scored_at":         score_row.scored_at,
+            # Freshness reflects the age of the underlying live price data, not the
+            # scorer's clock. None when the asset has no price snapshot at all.
+            "data_freshness":    price_row.recorded_at if price_row else None,
         })
 
     df = pd.DataFrame(rows)
@@ -1237,7 +1242,7 @@ def render_overview_tab(df: pd.DataFrame) -> None:
 | **Risk Score** | Composite score 0–100. Higher = safer. Weighted across peg, liquidity, reserves, and adoption. |
 | **Risk Level** | Plain-English label: Low Risk (80+), Moderate (60–79), Elevated (40–59), High Risk (<40). |
 | **Regime** | Current condition in plain language: Stable, Mild stress, Peg stress, Liquidity stress, Data quality concern, or High risk. Derived from the score and peg, and tracked over time in the Risk Events tab. |
-| **Data Freshness** | How recently the risk score was calculated. |
+| **Data Freshness** | How recently live price data was recorded for this asset. "—" means no live market data is available (most assets are supply-only). |
         """)
 
     if df.empty:
@@ -1265,7 +1270,7 @@ def render_overview_tab(df: pd.DataFrame) -> None:
         "symbol", "market_cap", "supply",
         "change_7d", "change_30d",
         "top_chain", "peg_deviation_bps",
-        "overall_score", "risk_label", "regime", "scored_at",
+        "overall_score", "risk_label", "regime", "data_freshness",
     ]].copy()
 
     display["market_cap"]    = display["market_cap"].apply(_fmt_supply)
@@ -1276,7 +1281,7 @@ def render_overview_tab(df: pd.DataFrame) -> None:
         lambda v: f"{v:.1f} bps" if pd.notna(v) else "—"
     )
     display["overall_score"] = display["overall_score"].apply(lambda v: f"{v:.0f} / 100")
-    display["scored_at"]     = display["scored_at"].apply(_fmt_freshness)
+    display["data_freshness"] = display["data_freshness"].apply(_fmt_freshness)
 
     display.columns = [
         "Symbol", "Market Cap", "Supply",
