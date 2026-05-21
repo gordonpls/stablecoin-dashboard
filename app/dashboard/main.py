@@ -372,6 +372,13 @@ def load_score_history(symbol: str, days: int = 30) -> pd.DataFrame:
     return pd.DataFrame([r.to_dict() for r in rows])
 
 
+@st.cache_data(ttl=120, show_spinner=False)
+def load_market_changes(limit: int = 30) -> list[dict]:
+    from services.market_changes import compute_market_changes
+
+    return compute_market_changes(limit=limit)
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def load_api_usage() -> pd.DataFrame:
     with get_session() as session:
@@ -512,6 +519,98 @@ def render_header(df: pd.DataFrame) -> None:
     ), unsafe_allow_html=True)
 
     st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
+
+
+SEVERITY_COLORS = {
+    "high":   C_RED,
+    "medium": C_ORANGE,
+    "low":    C_AMBER,
+    "info":   C_BLUE,
+}
+
+METRIC_LABELS = {
+    "supply":            "Supply",
+    "peg_deviation_bps": "Peg Deviation",
+    "liquidity_usd":     "Liquidity Depth",
+    "overall_score":     "Risk Score",
+}
+
+
+def _fmt_metric_value(metric: str, value: float | None) -> str:
+    if value is None:
+        return "—"
+    if metric in ("supply", "liquidity_usd"):
+        return _fmt_supply(value)
+    if metric == "peg_deviation_bps":
+        return f"{value:.1f} bps"
+    return f"{value:.0f}"
+
+
+def _fmt_change(change: dict) -> str:
+    pct = change.get("percent_change")
+    if pct is not None:
+        sign = "+" if pct >= 0 else ""
+        return f"{sign}{pct:.1f}%"
+    abs_change = change.get("absolute_change") or 0
+    sign = "+" if abs_change >= 0 else ""
+    if change["metric"] == "peg_deviation_bps":
+        return f"{sign}{abs_change:.1f} bps"
+    return f"{sign}{abs_change:.0f} pts"
+
+
+def render_market_changes(changes: list[dict]) -> None:
+    _section_header(
+        "Market Changes",
+        "The biggest moves since the prior snapshot, so you don't have to read every chart. "
+        "Ranked by severity — supply over 7 days, peg / liquidity / risk score over 24 hours.",
+    )
+
+    if not changes:
+        _callout(
+            "Not enough history yet to compute market changes. "
+            "This populates once the pipelines have run on at least two snapshots.",
+            "info",
+        )
+        st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
+        return
+
+    for change in changes[:5]:
+        color = SEVERITY_COLORS.get(change["severity"], C_BLUE)
+        st.markdown(
+            f"<div style='border-left:3px solid {color}; background:rgba(128,128,128,0.07); "
+            f"padding:8px 14px; border-radius:0 6px 6px 0; font-size:13px; "
+            f"line-height:1.5; margin-bottom:8px;'>"
+            f"<span style='color:{color}; font-weight:700; text-transform:uppercase; "
+            f"font-size:10px; letter-spacing:0.08em; margin-right:10px;'>{change['severity']}</span>"
+            f"{change['summary']}</div>",
+            unsafe_allow_html=True,
+        )
+
+    with st.expander("All movers"):
+        table = pd.DataFrame([
+            {
+                "Asset":    c["asset"],
+                "Metric":   METRIC_LABELS.get(c["metric"], c["metric"]),
+                "Previous": _fmt_metric_value(c["metric"], c["previous_value"]),
+                "Current":  _fmt_metric_value(c["metric"], c["current_value"]),
+                "Change":   _fmt_change(c),
+                "Window":   c["comparison_window"],
+                "Severity": c["severity"].capitalize(),
+            }
+            for c in changes
+        ])
+
+        def _color_sev(val: str) -> str:
+            c = SEVERITY_COLORS.get(val.lower(), "")
+            return f"color:{c}; font-weight:700;" if c else ""
+
+        st.dataframe(
+            table.style.map(_color_sev, subset=["Severity"]),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.markdown("<div style='margin-top:20px;'></div>", unsafe_allow_html=True)
 
 
 def render_overview_tab(df: pd.DataFrame) -> None:
@@ -937,6 +1036,7 @@ def main() -> None:
     scores_df   = load_latest_scores()
 
     render_header(overview_df)
+    render_market_changes(load_market_changes())
 
     tab_overview, tab_supply, tab_peg, tab_risk, tab_api = st.tabs([
         "Overview",

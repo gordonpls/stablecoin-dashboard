@@ -19,6 +19,17 @@ def list_stablecoins(limit: int = Query(default=100, le=500)) -> list[dict]:
         return [r.to_dict() for r in rows]
 
 
+@app.get("/stablecoins/changes")
+def get_market_changes(limit: int = Query(default=20, le=100)) -> list[dict]:
+    """Ranked, plain-language changes since a prior snapshot across all assets.
+
+    Returns an empty list when there is not enough history to compare.
+    """
+    from services.market_changes import compute_market_changes
+
+    return compute_market_changes(limit=limit)
+
+
 @app.get("/stablecoins/{symbol}")
 def get_stablecoin(symbol: str) -> dict:
     with get_session() as session:

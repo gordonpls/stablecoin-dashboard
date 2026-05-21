@@ -1,0 +1,1 @@
+- 2026-05-21: Add Market Changes summary — services/market_changes.py, GET /stablecoins/changes endpoint, top-level dashboard section, and tests/test_market_changes.py.

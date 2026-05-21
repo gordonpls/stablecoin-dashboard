@@ -26,3 +26,6 @@ build/
 
 # stablecoin.db is intentionally tracked so GitHub Actions can
 # commit refreshed data and Streamlit Cloud picks it up on redeploy.
+
+# Agent run logs (cost/output JSON — machine-generated, not for review)
+.agent/runs/
