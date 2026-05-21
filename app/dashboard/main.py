@@ -445,6 +445,20 @@ def load_liquidity_drops(window: str = "24h", limit: int = 10) -> list[dict]:
     return largest_liquidity_drops(window=window, limit=limit)
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def load_chain_concentration(limit: int = 50) -> list[dict]:
+    from services.chain_concentration import chain_concentration_ranking
+
+    return chain_concentration_ranking(limit=limit)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_chain_supply(symbol: str) -> dict | None:
+    from services.chain_concentration import get_chain_concentration
+
+    return get_chain_concentration(symbol)
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def load_pipeline_runs(limit: int = 100) -> dict:
     from services.pipeline_runs import pipeline_status_summary, query_runs
@@ -1304,6 +1318,131 @@ def render_overview_tab(df: pd.DataFrame) -> None:
         render_profile(sel_symbol)
 
 
+CONCENTRATION_COLORS = {
+    "Single-chain":           C_RED,
+    "Highly concentrated":    C_RED,
+    "Concentrated":           C_ORANGE,
+    "Moderately diversified": C_AMBER,
+    "Diversified":            C_GREEN,
+    "Unknown":                C_MUTED,
+}
+
+# Share of supply on one chain that the dashboard flags as concentration risk —
+# mirrors services.chain_concentration.HIGH_CONCENTRATION_PCT.
+CHAIN_WARN_PCT = 75
+
+
+def render_chain_concentration() -> None:
+    """Cross-asset chain concentration: warning, asset×chain heatmap, table."""
+    _section_header(
+        "Chain Concentration Risk",
+        "How each stablecoin's supply is spread across blockchains. Heavy reliance on a single "
+        "chain is a platform risk: an outage, congestion spike, or bridge exploit there would "
+        "freeze most of the float — independent of the peg or reserves.",
+    )
+
+    with st.expander("How is concentration measured?"):
+        st.markdown(
+            f"**Top-chain share** is the percent of supply on the single largest chain. "
+            f"At or above **{CHAIN_WARN_PCT}%** an asset is flagged as a concentration risk.\n\n"
+            "**HHI** (Herfindahl-Hirschman Index, 0–10,000) is the sum of each chain's squared "
+            "percentage share — the standard concentration measure. A single chain scores 10,000; "
+            "an even split across *n* chains scores 10,000 ÷ *n*. Higher means more concentrated."
+        )
+
+    ranking = load_chain_concentration(limit=50)
+    if not ranking:
+        _callout(
+            "Chain breakdown data is unavailable. Run <code>python -m pipelines.update_supply</code>.",
+            "info",
+        )
+        return
+
+    flagged = [r for r in ranking if r.get("warning")]
+    if flagged:
+        names = ", ".join(
+            f"{r['asset']} ({r['top_chain_pct']:.0f}% on {r['top_chain']})" for r in flagged[:6]
+        )
+        more = f", and {len(flagged) - 6} more" if len(flagged) > 6 else ""
+        _callout(
+            f"<strong>{len(flagged)} asset(s) are highly concentrated on a single chain:</strong> "
+            f"{names}{more}. A single-chain outage or exploit would affect most of their supply.",
+            "warning",
+        )
+
+    # ── heatmap: most-concentrated assets × chains, coloured by supply share ──
+    details = [load_chain_supply(r["asset"]) for r in ranking[:12]]
+    per_asset: dict[str, dict[str, float]] = {}
+    asset_order: list[str] = []
+    chain_totals: dict[str, float] = {}
+    for det in details:
+        if not det:
+            continue
+        cmap = {
+            c["chain"]: c["supply_pct"]
+            for c in det.get("chains", [])
+            if c.get("supply_pct") is not None
+        }
+        if not cmap:
+            continue
+        per_asset[det["symbol"]] = cmap
+        asset_order.append(det["symbol"])
+        for ch, pct in cmap.items():
+            chain_totals[ch] = chain_totals.get(ch, 0.0) + pct
+
+    if asset_order:
+        top_chains = [c for c, _ in sorted(chain_totals.items(), key=lambda kv: kv[1], reverse=True)[:10]]
+        use_other = len(chain_totals) > len(top_chains)
+        cols = top_chains + (["Other"] if use_other else [])
+        z = []
+        for sym in asset_order:
+            cmap = per_asset[sym]
+            row = [round(cmap.get(ch, 0.0), 1) for ch in top_chains]
+            if use_other:
+                row.append(round(sum(p for ch, p in cmap.items() if ch not in top_chains), 1))
+            z.append(row)
+
+        fig = go.Figure(go.Heatmap(
+            z=z, x=cols, y=asset_order,
+            colorscale="OrRd", zmin=0, zmax=100,
+            colorbar=dict(title="% supply"),
+            hovertemplate="<b>%{y}</b><br>%{x}: %{z:.1f}%<extra></extra>",
+        ))
+        fig.update_layout(**_chart_layout(
+            title="Supply share by chain — darker = larger share  (most-concentrated assets)",
+            height=max(300, len(asset_order) * 36),
+            xaxis=dict(side="top", gridcolor="rgba(0,0,0,0)"),
+            yaxis=dict(autorange="reversed", gridcolor="rgba(0,0,0,0)"),
+            margin={"t": 70, "r": 16, "b": 20, "l": 90},
+        ))
+        st.plotly_chart(fig, use_container_width=True)
+
+    # ── comparison table ──
+    table = pd.DataFrame([
+        {
+            "Symbol":      r["asset"],
+            "Top Chain":   r["top_chain"],
+            "Top Chain %": round(r["top_chain_pct"], 1) if r["top_chain_pct"] is not None else None,
+            "Chains":      r["chain_count"],
+            "HHI":         round(r["hhi"]) if r["hhi"] is not None else None,
+            "Concentration": r["concentration_level"],
+        }
+        for r in ranking
+    ])
+
+    def _color_conc(val: str) -> str:
+        c = CONCENTRATION_COLORS.get(val, "")
+        return f"color:{c}; font-weight:700;" if c else ""
+
+    st.dataframe(
+        table.style.map(_color_conc, subset=["Concentration"]).format(
+            {"Top Chain %": "{:.1f}%", "HHI": "{:,.0f}"}, na_rep="—"
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
 def render_supply_tab(df: pd.DataFrame) -> None:
     _section_header(
         "Circulating Supply",
@@ -1390,6 +1529,9 @@ exploit, the stablecoin becomes temporarily unusable.
         st.plotly_chart(fig2, use_container_width=True)
     else:
         _callout("Supply history will appear after the pipeline has run on multiple days.", "info")
+
+    st.divider()
+    render_chain_concentration()
 
     st.divider()
     table = sorted_df[["symbol", "circulating_supply"]].copy()

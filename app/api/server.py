@@ -67,6 +67,22 @@ def liquidity_drops(
     return largest_liquidity_drops(window=window, limit=limit)
 
 
+@app.get("/stablecoins/chain-concentration")
+def chain_concentration(limit: int = Query(default=50, le=200)) -> list[dict]:
+    """Cross-asset chain concentration ranking, most concentrated first.
+
+    Each entry reports an asset's top chain, top-chain share, chain count, HHI,
+    and a plain-language concentration level/severity. Assets with no parseable
+    chain breakdown are omitted. Returns an empty list on a brand-new database.
+
+    Defined before ``/stablecoins/{symbol}`` so the literal path is not shadowed
+    by the symbol lookup.
+    """
+    from services.chain_concentration import chain_concentration_ranking
+
+    return chain_concentration_ranking(limit=limit)
+
+
 @app.get("/regimes")
 def list_regimes() -> list[dict]:
     """Current risk regime per asset, most severe first.
@@ -125,6 +141,23 @@ def get_liquidity(symbol: str) -> dict:
     from services.liquidity import get_liquidity_detail
 
     detail = get_liquidity_detail(symbol)
+    if detail is None:
+        raise HTTPException(status_code=404, detail=f"{symbol} not found")
+    return detail
+
+
+@app.get("/stablecoins/{symbol}/chain-supply")
+def get_chain_supply(symbol: str) -> dict:
+    """Chain breakdown + concentration risk for one asset.
+
+    Returns the normalized per-chain rows plus the top-chain share, HHI, and a
+    plain-language concentration level. 404 only when the symbol is completely
+    unknown; an asset with no chain breakdown returns concentration_level
+    "Unknown" with null metrics rather than guessed values.
+    """
+    from services.chain_concentration import get_chain_concentration
+
+    detail = get_chain_concentration(symbol)
     if detail is None:
         raise HTTPException(status_code=404, detail=f"{symbol} not found")
     return detail

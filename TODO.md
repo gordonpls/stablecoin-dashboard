@@ -517,7 +517,37 @@ Liquidity movement can be more important than static liquidity depth.
 
 ---
 
-## 8. Add Chain Concentration Risk
+## 8. Add Chain Concentration Risk  (DONE 2026-05-21)
+
+Implemented in `services/chain_concentration.py`. The supply-by-chain breakdown
+already lives as JSON in `supply_snapshots.supply_by_chain`, so this derives
+concentration signals on read (no new table / pipeline change, consistent with
+the #7 liquidity approach) using the single canonical chain parser
+(`services.profile._parse_chains`) so the profile page and this service can never
+disagree. `get_chain_concentration(symbol)` returns normalized per-chain rows
+plus the top chain + its share (the spec's `top_chain_concentration`, as a
+0–100 percent), an HHI (0–10000), a graded `concentration_level`/`severity`, and
+a `warning` flag (fires at ≥75% on one chain or single-chain, matching the
+existing Asset Profile threshold). `chain_concentration_ranking(limit)` ranks
+assets most-concentrated-first (severity → top-chain share → HHI), collapsing
+ticker-collision rows to the dominant asset and omitting assets with no parseable
+breakdown. Exposed via `GET /stablecoins/{symbol}/chain-supply` and
+`GET /stablecoins/chain-concentration` (registered before `/stablecoins/{symbol}`
+so it isn't shadowed), and surfaced as a "Chain Concentration Risk" section in
+the Supply tab: a highly-concentrated-asset warning callout, an asset×chain
+supply-share heatmap (top 12 assets, top 10 chains + "Other"), and a sortable
+comparison table (top chain, top-chain %, chain count, HHI, level). Tests in
+`tests/test_chain_concentration.py`.
+
+Remaining / follow-ups:
+- Wire the per-asset concentration block (HHI + level) into the Asset Profile
+  page's existing Chain Distribution section (it currently shows only the 75%
+  callout); reuse `get_chain_concentration`.
+- The Supply-tab heatmap loads each top-asset's detail separately
+  (`load_chain_supply` ×12, all cached). If a normalized
+  `stablecoin_chain_supply` table is ever added (the spec's suggestion), the
+  heatmap and ranking could read it directly, and chain *history* (share drift
+  over time) would become queryable.
 
 ### Objective
 
@@ -1022,7 +1052,7 @@ These are the highest-value next tasks for an AI coding agent:
 6. Add provider fallback status visibility.
 7. ~~Add explainable score drilldowns.~~ (DONE 2026-05-21 — `/stablecoins/{symbol}/score-explanation` + Risk Scores / Profile drilldown)
 8. ~~Add risk events timeline.~~ (DONE 2026-05-21)
-9. Add chain concentration risk.
+9. ~~Add chain concentration risk.~~ (DONE 2026-05-21 — `services/chain_concentration.py`, `/stablecoins/{symbol}/chain-supply` + `/stablecoins/chain-concentration`, Supply-tab heatmap + table)
 10. Add stablecoin dominance and market share.
 
 ---
