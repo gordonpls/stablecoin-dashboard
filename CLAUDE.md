@@ -4,7 +4,7 @@ You are building a cost-conscious stablecoin and crypto dashboard.
 
 ## Goal
 
-Build a dashboard that tracks stablecoin health, liquidity, peg risk, supply growth, reserve transparency, and market activity.
+Build a dashboard that tracks stablecoin health, liquidity, peg risk, supply growth, reserve transparency, and market activity. We will continue adding features and building upon this dashboard. It will also teach the user about crypto/stablecoins.
 
 ## Priorities
 

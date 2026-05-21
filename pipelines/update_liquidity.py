@@ -1,5 +1,6 @@
 """Pipeline: update order book depth / liquidity metrics from exchanges."""
 
+import asyncio
 import logging
 from datetime import datetime
 
@@ -12,7 +13,7 @@ logger = logging.getLogger(__name__)
 def run(symbols: list[str] | None = None) -> None:
     """Re-uses the price pipeline but focuses on depth columns."""
     init_db()
-    prices = get_peg_prices(symbols)
+    prices = asyncio.run(get_peg_prices(symbols))
     now = datetime.utcnow()
     rows = []
     for symbol, data in prices.items():

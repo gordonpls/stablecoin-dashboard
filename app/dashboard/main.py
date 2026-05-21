@@ -6,6 +6,8 @@ Reads directly from SQLite. Run ingestion pipelines first to populate data.
 from __future__ import annotations
 
 import sys
+import time
+import logging
 from pathlib import Path
 
 # Ensure repo root is on sys.path regardless of Streamlit's working directory.
@@ -13,6 +15,9 @@ sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import json
 from datetime import datetime, timedelta
+
+import streamlit.components.v1 as components
+from streamlit_autorefresh import st_autorefresh
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -27,6 +32,52 @@ from db.models import (
     get_session,
     init_db,
 )
+
+logger = logging.getLogger(__name__)
+
+# Per CLAUDE.md: "1 to 5 minute refresh for peg prices", "daily refresh for slow data".
+PRICE_REFRESH_SECS  = 600   # price/score pipeline cadence (10 minutes)
+SUPPLY_REFRESH_SECS = 3600  # supply + reserves cadence (1 hour)
+
+# Process-level timestamps so the timer survives multiple browser sessions
+# without hammering the APIs on every new connection.
+_PIPELINE_LAST_RUN: dict[str, float] = {"prices": 0.0, "supply": 0.0}
+
+
+def _run_scheduled_pipelines() -> bool:
+    """Run pipelines whose interval has elapsed. Returns True if any pipeline ran."""
+    import core.cache as _api_cache
+    import pipelines.update_prices     as _prices
+    import pipelines.update_supply     as _supply
+    import pipelines.update_reserves   as _reserves
+    import pipelines.score_stablecoins as _scores
+
+    now = time.time()
+    ran = False
+
+    if now - _PIPELINE_LAST_RUN["supply"] >= SUPPLY_REFRESH_SECS:
+        try:
+            _api_cache.clear("defillama")
+            _supply.run()
+            _reserves.run()
+            _PIPELINE_LAST_RUN["supply"] = now
+            ran = True
+        except Exception as exc:
+            logger.warning("auto_supply_pipeline_failed error=%s", exc)
+
+    if now - _PIPELINE_LAST_RUN["prices"] >= PRICE_REFRESH_SECS:
+        try:
+            _api_cache.clear("binance")
+            _api_cache.clear("coinbase")
+            _prices.run()
+            _scores.run()
+            _PIPELINE_LAST_RUN["prices"] = now
+            ran = True
+        except Exception as exc:
+            logger.warning("auto_price_pipeline_failed error=%s", exc)
+
+    return ran
+
 
 st.set_page_config(
     page_title="Stablecoin Dashboard",
@@ -470,6 +521,20 @@ def render_overview_tab(df: pd.DataFrame) -> None:
         "Click any column header to sort. Risk Level is colour-coded — green is safest, red is most concerning.",
     )
 
+    with st.expander("What does each column mean?"):
+        st.markdown("""
+| Column | What it measures |
+|---|---|
+| **Market Cap** | Total value of all tokens in circulation. For a $1.00-pegged coin this equals supply. |
+| **Supply** | Number of tokens outstanding, converted to USD at the current price. |
+| **7D / 30D Change** | Supply growth or contraction. Rapid growth suggests rising adoption; a sharp drop may signal redemptions or distress. |
+| **Top Chain** | The blockchain holding the largest share of supply (e.g. Ethereum, Tron, BSC). |
+| **Peg Deviation** | Distance from $1.00, in basis points. 1 bps = $0.0001. Healthy coins stay within 10 bps. |
+| **Risk Score** | Composite score 0–100. Higher = safer. Weighted across peg, liquidity, reserves, and adoption. |
+| **Risk Level** | Plain-English label: Low Risk (80+), Moderate (60–79), Elevated (40–59), High Risk (<40). |
+| **Data Freshness** | How recently the risk score was calculated. |
+        """)
+
     if df.empty:
         _callout("No data yet. Run the ingestion pipelines first.", "info")
         return
@@ -525,20 +590,6 @@ def render_overview_tab(df: pd.DataFrame) -> None:
         hide_index=True,
     )
 
-    with st.expander("What does each column mean?"):
-        st.markdown("""
-| Column | What it measures |
-|---|---|
-| **Market Cap** | Total value of all tokens in circulation. For a $1.00-pegged coin this equals supply. |
-| **Supply** | Number of tokens outstanding, converted to USD at the current price. |
-| **7D / 30D Change** | Supply growth or contraction. Rapid growth suggests rising adoption; a sharp drop may signal redemptions or distress. |
-| **Top Chain** | The blockchain holding the largest share of supply (e.g. Ethereum, Tron, BSC). |
-| **Peg Deviation** | Distance from $1.00, in basis points. 1 bps = $0.0001. Healthy coins stay within 10 bps. |
-| **Risk Score** | Composite score 0–100. Higher = safer. Weighted across peg, liquidity, reserves, and adoption. |
-| **Risk Level** | Plain-English label: Low Risk (80+), Moderate (60–79), Elevated (40–59), High Risk (<40). |
-| **Data Freshness** | How recently the risk score was calculated. |
-        """)
-
 
 def render_supply_tab(df: pd.DataFrame) -> None:
     _section_header(
@@ -546,6 +597,18 @@ def render_supply_tab(df: pd.DataFrame) -> None:
         "How much of each stablecoin exists, valued in USD. "
         "Because each token targets $1.00, supply is a direct measure of adoption and usage.",
     )
+
+    with st.expander("Why does supply matter?"):
+        st.markdown("""
+**Large, growing supply** reflects strong adoption. Tether (USDT) and USD Coin (USDC) are the
+two largest and serve as the backbone of crypto trading.
+
+**Sudden supply drops** can signal a bank-run dynamic — holders redeeming tokens faster than
+new ones are minted — which sometimes precedes a peg break.
+
+**Supply concentration** on a single chain is a platform risk. If that chain has an outage or
+exploit, the stablecoin becomes temporarily unusable.
+        """)
 
     if df.empty:
         _callout("No supply data yet. Run <code>python -m pipelines.update_supply</code>.", "info")
@@ -588,18 +651,6 @@ def render_supply_tab(df: pd.DataFrame) -> None:
             "info",
         )
 
-    with st.expander("Why does supply matter?"):
-        st.markdown("""
-**Large, growing supply** reflects strong adoption. Tether (USDT) and USD Coin (USDC) are the
-two largest and serve as the backbone of crypto trading.
-
-**Sudden supply drops** can signal a bank-run dynamic — holders redeeming tokens faster than
-new ones are minted — which sometimes precedes a peg break.
-
-**Supply concentration** on a single chain is a platform risk. If that chain has an outage or
-exploit, the stablecoin becomes temporarily unusable.
-        """)
-
     st.divider()
     _section_header(
         "Supply History",
@@ -641,6 +692,23 @@ def render_peg_tab(df: pd.DataFrame) -> None:
         "1 bps = $0.0001. Healthy coins rarely exceed 10 bps.",
     )
 
+    with st.expander("What is a basis point, and when should I be concerned?"):
+        st.markdown("""
+**1 basis point (bps) = 0.01% = $0.0001**
+
+| Zone | Deviation | Dollar value | What it means |
+|---|---|---|---|
+| Normal | < 10 bps | < $0.0010 | Within expected market noise |
+| Elevated | 10–50 bps | $0.0010–$0.0050 | Worth monitoring |
+| Warning | 50–100 bps | $0.0050–$0.0100 | Liquidity or confidence stress |
+| Critical | > 100 bps | > $0.0100 | Potential peg break |
+
+**Why do stablecoins lose their peg?**
+- **Fiat-backed (USDT, USDC):** Solvency concerns or high redemption demand.
+- **Crypto-backed (DAI):** Collateral value drops faster than the protocol can liquidate.
+- **Algorithmic:** Supply–demand imbalance. Terra/LUNA (2022) is the most prominent failure.
+        """)
+
     if df.empty:
         _callout("No price data yet. Run <code>python -m pipelines.update_prices</code>.", "info")
         return
@@ -678,23 +746,6 @@ def render_peg_tab(df: pd.DataFrame) -> None:
         yaxis=dict(gridcolor="rgba(128,128,128,0.12)", zeroline=False, title="Deviation (bps)"),
     ))
     st.plotly_chart(fig, use_container_width=True)
-
-    with st.expander("What is a basis point, and when should I be concerned?"):
-        st.markdown("""
-**1 basis point (bps) = 0.01% = $0.0001**
-
-| Zone | Deviation | Dollar value | What it means |
-|---|---|---|---|
-| Normal | < 10 bps | < $0.0010 | Within expected market noise |
-| Elevated | 10–50 bps | $0.0010–$0.0050 | Worth monitoring |
-| Warning | 50–100 bps | $0.0050–$0.0100 | Liquidity or confidence stress |
-| Critical | > 100 bps | > $0.0100 | Potential peg break |
-
-**Why do stablecoins lose their peg?**
-- **Fiat-backed (USDT, USDC):** Solvency concerns or high redemption demand.
-- **Crypto-backed (DAI):** Collateral value drops faster than the protocol can liquidate.
-- **Algorithmic:** Supply–demand imbalance. Terra/LUNA (2022) is the most prominent failure.
-        """)
 
     st.divider()
     _section_header(
@@ -738,6 +789,22 @@ def render_risk_tab(df: pd.DataFrame) -> None:
         "Higher scores mean lower risk. The overall score is a weighted average.",
     )
 
+    with st.expander("How are scores calculated?"):
+        st.markdown("""
+| Dimension | Weight | How it is scored |
+|---|---|---|
+| **Peg** | 35% | 100 = perfect $1.00; drops to 0 at 100 bps deviation |
+| **Liquidity** | 25% | 100 = $50M+ combined bid/ask order book depth |
+| **Reserve** | 25% | Based on report age and whether an independent auditor signed off |
+| **Adoption** | 15% | 100 = $5B+ circulating supply; scales linearly |
+
+**Overall = Peg × 0.35 + Liquidity × 0.25 + Reserve × 0.25 + Adoption × 0.15**
+
+Risk levels: **Low Risk** 80+  ·  **Moderate** 60–79  ·  **Elevated** 40–59  ·  **High Risk** < 40
+
+*Scores are a quantitative starting point, not financial advice.*
+        """)
+
     if df.empty:
         _callout("No scores yet. Run <code>python -m pipelines.score_stablecoins</code>.", "info")
         return
@@ -775,22 +842,6 @@ def render_risk_tab(df: pd.DataFrame) -> None:
         margin={"t": 80, "r": 16, "b": 40, "l": 80},
     ))
     st.plotly_chart(fig, use_container_width=True)
-
-    with st.expander("How are scores calculated?"):
-        st.markdown("""
-| Dimension | Weight | How it is scored |
-|---|---|---|
-| **Peg** | 35% | 100 = perfect $1.00; drops to 0 at 100 bps deviation |
-| **Liquidity** | 25% | 100 = $50M+ combined bid/ask order book depth |
-| **Reserve** | 25% | Based on report age and whether an independent auditor signed off |
-| **Adoption** | 15% | 100 = $5B+ circulating supply; scales linearly |
-
-**Overall = Peg × 0.35 + Liquidity × 0.25 + Reserve × 0.25 + Adoption × 0.15**
-
-Risk levels: **Low Risk** 80+  ·  **Moderate** 60–79  ·  **Elevated** 40–59  ·  **High Risk** < 40
-
-*Scores are a quantitative starting point, not financial advice.*
-        """)
 
     st.divider()
     _section_header(
@@ -877,6 +928,11 @@ def main() -> None:
     init_db()
     _inject_styles()
 
+    # ── auto-refresh (always on) ───────────────────────────────────────────────
+    st_autorefresh(interval=PRICE_REFRESH_SECS * 1000, key="data_autorefresh")
+    if _run_scheduled_pipelines():
+        st.cache_data.clear()
+
     overview_df = load_overview()
     scores_df   = load_latest_scores()
 
@@ -903,6 +959,53 @@ def main() -> None:
 
     st.sidebar.markdown("---")
     st.sidebar.caption(f"Data as of {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC")
+
+    # ── auto-refresh status ────────────────────────────────────────────────────
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Auto-Refresh")
+    _price_rem  = max(0, int(PRICE_REFRESH_SECS  - (time.time() - _PIPELINE_LAST_RUN["prices"])))
+    _supply_rem = max(0, int(SUPPLY_REFRESH_SECS - (time.time() - _PIPELINE_LAST_RUN["supply"])))
+    with st.sidebar:
+        components.html(
+                f"""
+                <style>
+                    .cd-row {{
+                        font-size: 12px;
+                        color: rgba(160,160,160,0.85);
+                        font-family: monospace;
+                        padding: 2px 0;
+                    }}
+                    .cd-label {{ opacity: 0.7; }}
+                </style>
+                <div class="cd-row">
+                    <span class="cd-label">Prices &amp; scores: </span>
+                    <span id="cd-price">—</span>
+                </div>
+                <div class="cd-row">
+                    <span class="cd-label">Supply &amp; reserves: </span>
+                    <span id="cd-supply">—</span>
+                </div>
+                <script>
+                    function makeTimer(id, startSecs) {{
+                        var rem = startSecs;
+                        (function tick() {{
+                            var el = document.getElementById(id);
+                            if (!el) return;
+                            var m = Math.floor(rem / 60);
+                            var s = rem % 60;
+                            el.innerText = m + ':' + (s < 10 ? '0' : '') + s;
+                            if (rem > 0) {{ rem--; setTimeout(tick, 1000); }}
+                            else {{ el.innerText = 'refreshing…'; }}
+                        }})();
+                    }}
+                    makeTimer('cd-price',  {_price_rem});
+                    makeTimer('cd-supply', {_supply_rem});
+                </script>
+                """,
+                height=52,
+            )
+
+    # ── manual refresh ─────────────────────────────────────────────────────────
     st.sidebar.markdown("---")
     st.sidebar.subheader("Manual Refresh")
     pwd = st.sidebar.text_input("Password", type="password", key="refresh_pwd")

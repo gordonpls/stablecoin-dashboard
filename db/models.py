@@ -8,7 +8,22 @@ from typing import Generator
 from sqlalchemy import create_engine, Column, String, Float, Integer, Text, DateTime, Date
 from sqlalchemy.orm import DeclarativeBase, Session
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./stablecoin.db")
+def _default_db_url() -> str:
+    # On Streamlit Cloud the repo root is a read-only mount; fall back to /tmp.
+    candidate = os.path.join(os.path.dirname(__file__), "..", "stablecoin.db")
+    candidate = os.path.abspath(candidate)
+    try:
+        # Test writeability by touching the file or its parent directory.
+        parent = os.path.dirname(candidate)
+        if os.access(parent, os.W_OK):
+            return f"sqlite:///{candidate}"
+    except Exception:
+        pass
+    import tempfile
+    return f"sqlite:///{os.path.join(tempfile.gettempdir(), 'stablecoin.db')}"
+
+
+DATABASE_URL = os.getenv("DATABASE_URL", _default_db_url())
 engine = create_engine(
     DATABASE_URL,
     echo=False,
