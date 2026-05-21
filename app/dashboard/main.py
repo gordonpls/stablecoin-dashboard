@@ -431,6 +431,20 @@ def load_risk_events(limit: int = 300) -> list[dict]:
     return query_events(limit=limit)
 
 
+@st.cache_data(ttl=120, show_spinner=False)
+def load_liquidity_detail(symbol: str) -> dict | None:
+    from services.liquidity import get_liquidity_detail
+
+    return get_liquidity_detail(symbol)
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def load_liquidity_drops(window: str = "24h", limit: int = 10) -> list[dict]:
+    from services.liquidity import largest_liquidity_drops
+
+    return largest_liquidity_drops(window=window, limit=limit)
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def load_pipeline_runs(limit: int = 100) -> dict:
     from services.pipeline_runs import pipeline_status_summary, query_runs
@@ -826,6 +840,73 @@ def _profile_history_charts(symbol: str) -> None:
         _callout("Score history appears after the pipeline has run on multiple days.", "info")
 
 
+def _depth_delta_html(change: dict | None) -> str:
+    """Coloured '▲ 12% over 24h' fragment for a stat-card description."""
+    if change is None:
+        return "<span style='opacity:0.6;'>trend pending</span>"
+    pct = change["percent_change"]
+    arrow = "▲" if pct >= 0 else "▼"
+    color = C_GREEN if pct >= 0 else C_RED
+    window = "24h" if change["comparison_window"] == "24h" else "7d"
+    return f"<span style='color:{color}; font-weight:700;'>{arrow} {abs(pct):.0f}%</span> over {window}"
+
+
+def _render_liquidity_section(symbol: str, price: dict) -> None:
+    """Order-book depth, its 24h/7d trend, and a depth-over-time chart."""
+    _section_header(
+        "Order Book Liquidity",
+        "Depth on each side of the book on the primary exchange, and how it is "
+        "trending. Thin or thinning depth makes the peg easier to push off $1.00.",
+    )
+    detail = load_liquidity_detail(symbol)
+    current = (detail or {}).get("current") or {}
+    bid   = current.get("bid_depth_usd",   price.get("bid_depth_usd"))
+    ask   = current.get("ask_depth_usd",   price.get("ask_depth_usd"))
+    total = current.get("total_depth_usd", price.get("total_depth_usd"))
+    change_24h = (detail or {}).get("change_24h")
+    change_7d  = (detail or {}).get("change_7d")
+    trend      = (detail or {}).get("trend")
+
+    lc1, lc2, lc3 = st.columns(3, gap="medium")
+    lc1.markdown(_stat_card("Bid Depth", _fmt_supply(bid),
+                            "Buy-side support under the price.", C_GREEN), unsafe_allow_html=True)
+    lc2.markdown(_stat_card("Ask Depth", _fmt_supply(ask),
+                            "Sell-side liquidity above the price.", C_ORANGE), unsafe_allow_html=True)
+    lc3.markdown(_stat_card("Total Depth", _fmt_supply(total),
+                            _depth_delta_html(change_24h or change_7d), C_BLUE), unsafe_allow_html=True)
+
+    # Deterioration callout — surface a sharp drop in plain language.
+    drop = None
+    for ch in (change_24h, change_7d):
+        if ch is not None and ch["percent_change"] <= -8.0:
+            drop = ch if (drop is None or ch["percent_change"] < drop["percent_change"]) else drop
+    if drop is not None:
+        _callout(f"<strong>Liquidity deteriorating:</strong> {drop['summary']}", "warning")
+    elif trend == "improving":
+        basis = change_24h or change_7d
+        _callout(f"Liquidity is improving — {basis['summary']}", "info")
+
+    history = (detail or {}).get("history") or []
+    if len(history) > 1:
+        hist_df = pd.DataFrame(history)
+        hist_df["recorded_at"] = pd.to_datetime(hist_df["recorded_at"])
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=hist_df["recorded_at"], y=hist_df["total_depth_usd"], mode="lines",
+            name="Total depth", fill="tozeroy", line=dict(color=C_BLUE, width=2),
+            fillcolor="rgba(59,130,246,0.08)",
+            hovertemplate="<b>%{x}</b><br>$%{y:,.0f}<extra></extra>",
+        ))
+        fig.update_layout(**_chart_layout(
+            title="", height=240,
+            yaxis=dict(gridcolor="rgba(128,128,128,0.12)", zeroline=False, tickprefix="$", tickformat=",.0f"),
+        ))
+        st.markdown("<div style='margin-top:8px;'></div>", unsafe_allow_html=True)
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        _callout("Liquidity history appears once the pipeline has run a few times.", "info")
+
+
 def _render_regime_history(history: list[dict]) -> None:
     """Step chart of an asset's regime transitions over time.
 
@@ -1013,18 +1094,7 @@ def render_profile(symbol: str) -> None:
     st.divider()
 
     # ── order book liquidity ──────────────────────────────────────────────────
-    _section_header(
-        "Order Book Liquidity",
-        "How much depth sits on each side of the book on the primary exchange. "
-        "Thin depth means the peg is easier to push off $1.00.",
-    )
-    lc1, lc2, lc3 = st.columns(3, gap="medium")
-    lc1.markdown(_stat_card("Bid Depth", _fmt_supply(price.get("bid_depth_usd")),
-                            "Buy-side support under the price.", C_GREEN), unsafe_allow_html=True)
-    lc2.markdown(_stat_card("Ask Depth", _fmt_supply(price.get("ask_depth_usd")),
-                            "Sell-side liquidity above the price.", C_ORANGE), unsafe_allow_html=True)
-    lc3.markdown(_stat_card("Total Depth", _fmt_supply(price.get("total_depth_usd")),
-                            "Combined bid + ask depth in USD.", C_BLUE), unsafe_allow_html=True)
+    _render_liquidity_section(symbol, price)
 
     st.markdown("<div style='margin-top:24px;'></div>", unsafe_allow_html=True)
     st.divider()
@@ -1418,6 +1488,46 @@ def render_peg_tab(df: pd.DataFrame) -> None:
         st.plotly_chart(fig2, use_container_width=True)
     else:
         _callout("Price history will appear after the pipeline has run multiple times.", "info")
+
+    st.divider()
+    _section_header(
+        "Largest Liquidity Drops",
+        "Where order-book depth is thinning fastest. A shrinking book makes the "
+        "peg easier to break, so a sharp drop is an early stress signal.",
+    )
+    drop_window = st.radio(
+        "Window", ["24h", "7d"], horizontal=True, key="liq_drop_window",
+        label_visibility="collapsed",
+    )
+    drops = load_liquidity_drops(window=drop_window, limit=10)
+    if drops:
+        worst = drops[0]
+        if worst["severity"] in ("medium", "high"):
+            _callout(f"<strong>Sharpest drop:</strong> {worst['summary']}", "warning")
+        drop_df = pd.DataFrame([
+            {
+                "Asset": d["asset"],
+                "Depth Now (USD)": _fmt_supply(d["current_value"]),
+                "Depth Before (USD)": _fmt_supply(d["previous_value"]),
+                "Change": f"{d['percent_change']:.0f}%",
+                "Severity": d["severity"].title(),
+            }
+            for d in drops
+        ])
+
+        def _color_sev(val: str) -> str:
+            return f"color: {SEVERITY_COLORS.get(val.lower(), C_MUTED)}; font-weight: 600;"
+
+        st.dataframe(
+            drop_df.style.map(_color_sev, subset=["Severity"]),
+            use_container_width=True, hide_index=True,
+        )
+    else:
+        _callout(
+            f"No liquidity drops over {drop_window} — depth is stable, or there "
+            "is not yet enough history to compare.",
+            "info",
+        )
 
     st.divider()
     table = peg_df[["symbol", "price", "peg_deviation_bps", "bid_depth_usd", "ask_depth_usd"]].copy()

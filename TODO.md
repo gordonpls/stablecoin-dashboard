@@ -460,7 +460,32 @@ High risk: peg deviation > 50 bps or overall score < 60
 
 ---
 
-## 7. Add 24h and 7d Liquidity Change
+## 7. Add 24h and 7d Liquidity Change  (DONE 2026-05-21)
+
+Implemented in `services/liquidity.py`. Order-book depth already accumulates in
+`price_snapshots` (bid/ask depth, written by both the price and liquidity
+pipelines), so this turns that raw history into trend signals without a schema
+change. `get_liquidity_detail(symbol)` returns current depth, 24h and 7d
+total-depth change (absolute + percent + severity, reusing the
+market_changes liquidity thresholds), a bid/ask depth-imbalance metric and its
+24h move (a thin-side proxy for spread — we store depth, not best bid/ask, so a
+true spread is unavailable), a plain-language `trend`
+(improving/deteriorating/stable), and a chartable depth history.
+`largest_liquidity_drops(window, limit)` ranks the sharpest cross-asset depth
+declines. A window comparison requires a point at least half the window old, so
+a "24h change" is never claimed from an hour of data — insufficient history
+returns `None` rather than a misleading number. Exposed via
+`GET /stablecoins/{symbol}/liquidity` and `GET /stablecoins/liquidity-drops`
+(window=24h|7d), and surfaced as an enhanced Order Book Liquidity section on the
+Asset Profile (trend callout + depth-over-time chart) plus a "Largest Liquidity
+Drops" table in the Peg Deviation tab. Tests in `tests/test_liquidity.py`.
+
+Remaining / follow-ups:
+- True bid/ask *spread* (vs the depth-imbalance proxy used here) needs storing
+  best bid/ask prices in `price_snapshots` — a schema + ingestion change.
+- Liquidity history is read from `price_snapshots`; consider a dedicated
+  `liquidity_snapshots` table only if depth needs a different cadence/retention
+  from prices.
 
 ### Objective
 

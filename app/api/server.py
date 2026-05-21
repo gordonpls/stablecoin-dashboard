@@ -50,6 +50,23 @@ def list_risk_events(
     )
 
 
+@app.get("/stablecoins/liquidity-drops")
+def liquidity_drops(
+    window: str = Query(default="24h"),
+    limit: int = Query(default=10, le=100),
+) -> list[dict]:
+    """Cross-asset ranking of the sharpest order-book depth drops.
+
+    ``window`` is "24h" or "7d". Ordered by severity then drop magnitude;
+    returns an empty list when no asset has enough history to compare.
+    """
+    from services.liquidity import largest_liquidity_drops
+
+    if window not in ("24h", "7d"):
+        raise HTTPException(status_code=422, detail="window must be '24h' or '7d'")
+    return largest_liquidity_drops(window=window, limit=limit)
+
+
 @app.get("/regimes")
 def list_regimes() -> list[dict]:
     """Current risk regime per asset, most severe first.
@@ -96,6 +113,21 @@ def get_prices(symbol: str, limit: int = Query(default=288, le=1440)) -> list[di
             .limit(limit)
         ).scalars().all()
         return [r.to_dict() for r in rows]
+
+
+@app.get("/stablecoins/{symbol}/liquidity")
+def get_liquidity(symbol: str) -> dict:
+    """Order-book liquidity trend for one asset: 24h/7d depth change + history.
+
+    Always 200 for a known asset; sections are null when their history is
+    insufficient. 404 only when the symbol is completely unknown.
+    """
+    from services.liquidity import get_liquidity_detail
+
+    detail = get_liquidity_detail(symbol)
+    if detail is None:
+        raise HTTPException(status_code=404, detail=f"{symbol} not found")
+    return detail
 
 
 @app.get("/stablecoins/{symbol}/events")
