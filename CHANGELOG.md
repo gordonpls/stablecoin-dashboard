@@ -1,1 +1,2 @@
 - 2026-05-21: Add Market Changes summary — services/market_changes.py, GET /stablecoins/changes endpoint, top-level dashboard section, and tests/test_market_changes.py.
+- 2026-05-21: Add stablecoin profile pages — services/profile.py, GET /stablecoins/{symbol}/profile endpoint, new "Asset Profile" tab + clickable overview rows (price/supply/chains/liquidity/scores/reserves/freshness, deep-linkable via ?symbol=), and tests/test_profile.py.

@@ -137,7 +137,19 @@ timestamp
 
 ---
 
-## 2. Add Stablecoin Profile Pages
+## 2. Add Stablecoin Profile Pages  (DONE 2026-05-21)
+
+Implemented in `services/profile.py` (`get_stablecoin_profile`), exposed via
+`GET /stablecoins/{symbol}/profile`, and surfaced as a new "Asset Profile" tab
+plus an inline profile when a row is selected in the Overview table. Each
+profile shows current price/peg/supply/score metrics, per-source freshness
+pills, a score breakdown with the weakest dimension called out, price/supply/
+score history charts, chain distribution (with concentration warning), order
+book liquidity, and reserve composition — all scoped to the selected symbol,
+with missing data shown explicitly. Deep-linkable via `?symbol=`. Tests in
+`tests/test_profile.py`. (Note: this lays groundwork for #3 freshness and #8
+chain concentration, but those remain to be built out fully — e.g. a global
+`/data-freshness` endpoint and a cross-asset concentration table.)
 
 ### Objective
 
@@ -838,8 +850,8 @@ For every new feature, add tests for:
 
 These are the highest-value next tasks for an AI coding agent:
 
-1. Implement `Market Changes Summary`.
-2. Implement stablecoin profile pages.
+1. ~~Implement `Market Changes Summary`.~~ (DONE 2026-05-21)
+2. ~~Implement stablecoin profile pages.~~ (DONE 2026-05-21)
 3. Add metric-level freshness and confidence indicators.
 4. Add `pipeline_runs` table and job run history UI.
 5. Add data validation warnings.
@@ -852,6 +864,16 @@ These are the highest-value next tasks for an AI coding agent:
 ---
 
 # Discovered Issues
+
+## Deprecated Streamlit `use_container_width` will break after 2025-12-31
+
+Every `st.plotly_chart`/`st.dataframe` call in `app/dashboard/main.py` passes
+`use_container_width=True`, which Streamlit warns will be removed after
+2025-12-31 (replace with `width="stretch"`). Likewise `st.components.v1.html`
+(the sidebar countdown timer) is deprecated in favour of `st.iframe` after
+2026-06-01. These are cosmetic warnings today but will become hard failures —
+do a sweep before those dates. (New code added 2026-05-21 intentionally matched
+the existing pattern for consistency; migrate the whole file at once.)
 
 ## Supply snapshots collide on ticker symbol
 

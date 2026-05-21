@@ -65,6 +65,21 @@ def get_prices(symbol: str, limit: int = Query(default=288, le=1440)) -> list[di
         return [r.to_dict() for r in rows]
 
 
+@app.get("/stablecoins/{symbol}/profile")
+def get_profile(symbol: str) -> dict:
+    """Complete per-asset profile: price, supply, chains, scores, reserve, freshness.
+
+    Returns 404 only when the symbol is completely unknown; sections with no
+    data are returned as null rather than omitted or guessed.
+    """
+    from services.profile import get_stablecoin_profile
+
+    profile = get_stablecoin_profile(symbol)
+    if profile is None:
+        raise HTTPException(status_code=404, detail=f"{symbol} not found")
+    return profile
+
+
 @app.get("/providers/usage")
 def provider_usage() -> dict:
     """Return logged API call counts per provider (from the request log table)."""

@@ -379,6 +379,13 @@ def load_market_changes(limit: int = 30) -> list[dict]:
     return compute_market_changes(limit=limit)
 
 
+@st.cache_data(ttl=120, show_spinner=False)
+def load_profile(symbol: str) -> dict | None:
+    from services.profile import get_stablecoin_profile
+
+    return get_stablecoin_profile(symbol)
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def load_api_usage() -> pd.DataFrame:
     with get_session() as session:
@@ -613,6 +620,354 @@ def render_market_changes(changes: list[dict]) -> None:
     st.markdown("<div style='margin-top:20px;'></div>", unsafe_allow_html=True)
 
 
+# ── asset profile ───────────────────────────────────────────────────────────────
+
+STATUS_COLORS = {
+    "fresh":   C_GREEN,
+    "delayed": C_AMBER,
+    "stale":   C_RED,
+    "missing": C_MUTED,
+}
+STATUS_LABELS = {
+    "fresh":   "Fresh",
+    "delayed": "Delayed",
+    "stale":   "Stale",
+    "missing": "No data",
+}
+FRESHNESS_SOURCES = [("price", "Price"), ("supply", "Supply"), ("scores", "Scores"), ("reserve", "Reserve")]
+
+
+def _fmt_age(age_seconds: float | None) -> str:
+    if age_seconds is None:
+        return "—"
+    mins = int(age_seconds / 60)
+    if mins < 1:
+        return "just now"
+    if mins < 60:
+        return f"{mins}m ago"
+    hours = mins // 60
+    if hours < 24:
+        return f"{hours}h ago"
+    return f"{hours // 24}d ago"
+
+
+def _freshness_badges(freshness: dict) -> None:
+    """Render a row of per-source freshness pills (green/amber/red/grey)."""
+    chips = []
+    for key, label in FRESHNESS_SOURCES:
+        info = freshness.get(key) or {}
+        status = info.get("status", "missing")
+        color = STATUS_COLORS.get(status, C_MUTED)
+        status_txt = STATUS_LABELS.get(status, status)
+        age_txt = "" if status == "missing" else f" · {_fmt_age(info.get('age_seconds'))}"
+        chips.append(
+            f"<span style='display:inline-flex; align-items:center; gap:7px; "
+            f"padding:6px 12px; margin:0 8px 8px 0; border-radius:999px; "
+            f"border:1px solid rgba(128,128,128,0.18); font-size:12px;'>"
+            f"<span style='width:8px;height:8px;border-radius:50%;background:{color};'></span>"
+            f"<span style='color:{C_MUTED};'>{label}</span>"
+            f"<span style='font-weight:700;color:{color};'>{status_txt}{age_txt}</span>"
+            f"</span>"
+        )
+    st.markdown("<div style='margin-bottom:10px;'>" + "".join(chips) + "</div>", unsafe_allow_html=True)
+
+
+def _profile_history_charts(symbol: str) -> None:
+    """Price (24h) and supply (30d) side by side, then score history (30d)."""
+    left, right = st.columns(2, gap="large")
+
+    with left:
+        st.markdown("**Price — last 24h**")
+        price_hist = load_price_history(symbol, hours=24)
+        if not price_hist.empty and len(price_hist) > 1:
+            fig = go.Figure()
+            fig.add_hline(y=1.0, line_dash="dash", line_color="rgba(128,128,128,0.4)",
+                          annotation_text="$1.00", annotation_font_size=10)
+            fig.add_trace(go.Scatter(
+                x=price_hist["recorded_at"], y=price_hist["price"], mode="lines",
+                line=dict(color=C_PRIMARY, width=2),
+                hovertemplate="<b>%{x}</b><br>$%{y:.4f}<extra></extra>",
+            ))
+            fig.update_layout(**_chart_layout(
+                title="", height=260,
+                yaxis=dict(gridcolor="rgba(128,128,128,0.12)", zeroline=False, tickformat="$.4f"),
+            ))
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            _callout("Price history appears once the pipeline has run a few times.", "info")
+
+    with right:
+        st.markdown("**Supply — last 30d**")
+        supply_hist = load_supply_history(symbol, days=30)
+        if not supply_hist.empty and len(supply_hist) > 1:
+            # Collapse same-timestamp ticker collisions to the dominant value.
+            ss = (supply_hist.sort_values("circulating_supply", ascending=False)
+                  .drop_duplicates(subset=["recorded_at"]).sort_values("recorded_at"))
+            fig = go.Figure(go.Scatter(
+                x=ss["recorded_at"], y=ss["circulating_supply"], mode="lines",
+                fill="tozeroy", line=dict(color=C_BLUE, width=2),
+                fillcolor="rgba(59,130,246,0.08)",
+                hovertemplate="<b>%{x}</b><br>$%{y:,.0f}<extra></extra>",
+            ))
+            fig.update_layout(**_chart_layout(
+                title="", height=260,
+                yaxis=dict(gridcolor="rgba(128,128,128,0.12)", zeroline=False, tickprefix="$", tickformat=",.0f"),
+            ))
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            _callout("Supply history appears after the pipeline has run on multiple days.", "info")
+
+    st.markdown("**Risk scores — last 30d**")
+    score_hist = load_score_history(symbol, days=30)
+    if not score_hist.empty and len(score_hist) > 1:
+        fig = go.Figure()
+        line_styles = ["solid", "dash", "dot", "dashdot"]
+        for col, label, color, dash in zip(SCORE_COLS, SCORE_LABELS, SCORE_COLORS, line_styles):
+            fig.add_trace(go.Scatter(
+                x=score_hist["scored_at"], y=score_hist[col], name=label, mode="lines",
+                line=dict(color=color, dash=dash, width=2),
+                hovertemplate=f"<b>%{{x}}</b><br>{label}: %{{y:.0f}}<extra></extra>",
+            ))
+        fig.update_layout(**_chart_layout(
+            title="", height=280,
+            yaxis=dict(range=[0, 100], title="Score", gridcolor="rgba(128,128,128,0.12)", zeroline=False),
+            legend=dict(orientation="h", yanchor="bottom", y=1.01),
+        ))
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        _callout("Score history appears after the pipeline has run on multiple days.", "info")
+
+
+def render_profile(symbol: str) -> None:
+    """Full single-asset profile: metrics, scores, history, chains, reserves.
+
+    Every section makes missing data explicit rather than guessing.
+    """
+    profile = load_profile(symbol)
+    if profile is None:
+        _callout(f"No data found for <strong>{symbol}</strong>.", "info")
+        return
+
+    name     = profile.get("name") or symbol
+    issuer   = profile.get("issuer")
+    peg_mech = profile.get("peg_mechanism")
+    subtitle = " · ".join([p for p in (issuer, peg_mech) if p]) or "Issuer and peg mechanism not recorded"
+
+    st.markdown(
+        f"<h2 style='margin-bottom:2px;'>{name} "
+        f"<span style='color:{C_MUTED}; font-weight:600; font-size:18px;'>{symbol}</span></h2>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"<p style='color:{C_MUTED}; font-size:14px; margin-top:0; margin-bottom:16px;'>{subtitle}</p>",
+        unsafe_allow_html=True,
+    )
+    if not profile.get("registered"):
+        _callout(
+            "This asset is not in the curated registry, so issuer and peg details are unavailable. "
+            "Metrics below come from live snapshots.",
+            "info",
+        )
+
+    _freshness_badges(profile.get("freshness", {}))
+
+    # ── headline metrics ──────────────────────────────────────────────────────
+    price  = profile.get("price")  or {}
+    supply = profile.get("supply") or {}
+    scores = profile.get("scores") or {}
+
+    price_val  = price.get("price")
+    bps        = price.get("peg_deviation_bps")
+    supply_val = supply.get("circulating_supply")
+    overall    = scores.get("overall_score")
+    risk       = scores.get("risk_label", "—")
+
+    peg_accent = C_GREEN
+    if bps is not None:
+        peg_accent = C_RED if bps > 50 else C_AMBER if bps > 10 else C_GREEN
+    risk_accent = RISK_COLORS.get(risk, C_MUTED)
+
+    c1, c2, c3, c4 = st.columns(4, gap="medium")
+    c1.markdown(_stat_card(
+        "Price", f"${price_val:.4f}" if price_val is not None else "—",
+        f"Latest from {price.get('source', '—')}." if price_val is not None else "No price snapshot yet.",
+        C_BLUE,
+    ), unsafe_allow_html=True)
+    c2.markdown(_stat_card(
+        "Peg Deviation", f"{bps:.1f} bps" if bps is not None else "—",
+        "Distance from $1.00. 1 bps = $0.0001.", peg_accent,
+    ), unsafe_allow_html=True)
+    c3.markdown(_stat_card(
+        "Circulating Supply", _fmt_supply(supply_val),
+        f"Top chain: {supply.get('top_chain')}" if supply.get("top_chain") else "Across all chains.",
+        C_PRIMARY,
+    ), unsafe_allow_html=True)
+    c4.markdown(_stat_card(
+        "Risk Score", f"{overall:.0f} / 100" if overall is not None else "—",
+        risk if overall is not None else "Not scored yet.", risk_accent,
+    ), unsafe_allow_html=True)
+
+    st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
+
+    # ── score breakdown ───────────────────────────────────────────────────────
+    if scores:
+        _section_header(
+            "Risk Score Breakdown",
+            "How the overall score decomposes across four weighted dimensions: "
+            "peg 35% · liquidity 25% · reserve 25% · adoption 15%.",
+        )
+        vals = [scores.get(c) for c in SCORE_COLS]
+        fig = go.Figure(go.Bar(
+            x=vals, y=SCORE_LABELS, orientation="h", marker_color=SCORE_COLORS,
+            text=[f"{v:.0f}" if v is not None else "—" for v in vals], textposition="auto",
+            hovertemplate="%{y}: %{x:.0f}<extra></extra>",
+        ))
+        fig.update_layout(**_chart_layout(
+            title="", height=230,
+            xaxis=dict(range=[0, 100], title="Score (higher = safer)", gridcolor="rgba(128,128,128,0.12)", zeroline=False),
+            yaxis=dict(autorange="reversed", gridcolor="rgba(0,0,0,0)", zeroline=False),
+            margin={"t": 20, "r": 16, "b": 40, "l": 90},
+        ))
+        st.plotly_chart(fig, use_container_width=True)
+        present = [(lbl, v) for lbl, v in zip(SCORE_LABELS, vals) if v is not None]
+        if present:
+            weakest = min(present, key=lambda t: t[1])
+            _callout(f"Lowest dimension: <strong>{weakest[0]}</strong> at {weakest[1]:.0f} / 100 — "
+                     "the biggest drag on the overall score.", "info")
+    else:
+        _section_header("Risk Score Breakdown", "Risk scores have not been computed for this asset yet.")
+        _callout("No risk score available.", "info")
+
+    st.divider()
+
+    # ── history ───────────────────────────────────────────────────────────────
+    _section_header("History", "How this asset's price, supply, and risk scores have moved over time.")
+    _profile_history_charts(symbol)
+
+    st.divider()
+
+    # ── order book liquidity ──────────────────────────────────────────────────
+    _section_header(
+        "Order Book Liquidity",
+        "How much depth sits on each side of the book on the primary exchange. "
+        "Thin depth means the peg is easier to push off $1.00.",
+    )
+    lc1, lc2, lc3 = st.columns(3, gap="medium")
+    lc1.markdown(_stat_card("Bid Depth", _fmt_supply(price.get("bid_depth_usd")),
+                            "Buy-side support under the price.", C_GREEN), unsafe_allow_html=True)
+    lc2.markdown(_stat_card("Ask Depth", _fmt_supply(price.get("ask_depth_usd")),
+                            "Sell-side liquidity above the price.", C_ORANGE), unsafe_allow_html=True)
+    lc3.markdown(_stat_card("Total Depth", _fmt_supply(price.get("total_depth_usd")),
+                            "Combined bid + ask depth in USD.", C_BLUE), unsafe_allow_html=True)
+
+    st.markdown("<div style='margin-top:24px;'></div>", unsafe_allow_html=True)
+    st.divider()
+
+    # ── chain distribution ────────────────────────────────────────────────────
+    _section_header(
+        "Chain Distribution",
+        "Where this asset's supply lives. Heavy concentration on one chain is a platform risk.",
+    )
+    chains = supply.get("chains") or []
+    if chains:
+        top_chains = chains[:12]
+        fig = go.Figure(go.Bar(
+            x=[c["supply"] for c in top_chains], y=[c["chain"] for c in top_chains], orientation="h",
+            marker=dict(color=[c["supply"] for c in top_chains], colorscale="Blues", showscale=False),
+            hovertemplate="<b>%{y}</b><br>$%{x:,.0f}<extra></extra>",
+        ))
+        fig.update_layout(**_chart_layout(
+            title="", height=max(220, len(top_chains) * 30),
+            xaxis=dict(title="Supply (USD)", gridcolor="rgba(128,128,128,0.12)", zeroline=False),
+            yaxis=dict(autorange="reversed", gridcolor="rgba(0,0,0,0)", zeroline=False),
+            margin={"t": 20, "r": 16, "b": 40, "l": 110},
+        ))
+        st.plotly_chart(fig, use_container_width=True)
+        conc = supply.get("top_chain_pct")
+        if conc is not None and conc >= 75:
+            _callout(
+                f"<strong>Concentration risk:</strong> {conc:.0f}% of supply is on {supply.get('top_chain')}. "
+                "A single-chain outage or exploit would affect most of the supply.",
+                "warning",
+            )
+    else:
+        _callout("Chain distribution data is unavailable for this asset.", "info")
+
+    st.divider()
+
+    # ── reserve composition ───────────────────────────────────────────────────
+    _section_header(
+        "Reserve Composition",
+        "What backs the token, per the issuer's latest attestation. Reserve data is curated, not live.",
+    )
+    reserve = profile.get("reserve")
+    if reserve:
+        meta_bits = []
+        if reserve.get("auditor"):
+            meta_bits.append(f"Auditor: <strong>{reserve['auditor']}</strong>")
+        if reserve.get("report_date"):
+            meta_bits.append(f"Report date: {reserve['report_date']}")
+        if reserve.get("report_url"):
+            meta_bits.append(f"<a href='{reserve['report_url']}' target='_blank'>Source</a>")
+        if meta_bits:
+            st.markdown(
+                f"<p style='color:{C_MUTED}; font-size:13px; margin-bottom:12px;'>" + " · ".join(meta_bits) + "</p>",
+                unsafe_allow_html=True,
+            )
+        if reserve.get("is_stale"):
+            _callout(
+                f"<strong>Stale attestation:</strong> the reserve report is {reserve.get('age_days')} days old "
+                "(over 90 days). Treat composition with caution.",
+                "warning",
+            )
+        elif reserve.get("report_date") is None:
+            _callout("No attestation date is recorded for this asset's reserves.", "info")
+
+        comp = reserve.get("composition") or {}
+        if comp:
+            palette = [C_BLUE, C_PRIMARY, C_GREEN, C_AMBER, C_ORANGE, C_RED, "#ec4899", "#14b8a6"]
+            fig = go.Figure(go.Pie(
+                labels=[k.replace("_", " ") for k in comp.keys()],
+                values=list(comp.values()), hole=0.55,
+                marker=dict(colors=palette[:len(comp)]),
+                hovertemplate="%{label}: %{percent}<extra></extra>",
+            ))
+            fig.update_layout(**_chart_layout(title="", height=300, margin={"t": 20, "r": 16, "b": 16, "l": 16}))
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            _callout("Reserve composition breakdown is unavailable.", "info")
+    else:
+        _callout("No reserve report is recorded for this asset.", "info")
+
+
+def render_profile_tab(df: pd.DataFrame) -> None:
+    _section_header(
+        "Asset Profile",
+        "A deep dive on one stablecoin — price, supply, chains, reserves, and risk in one place. "
+        "Pick an asset below, or select a row in the Overview tab.",
+    )
+
+    if df.empty:
+        _callout("No data yet. Run the ingestion pipelines first.", "info")
+        return
+
+    symbols = df["symbol"].tolist()
+
+    # Default selection priority: a row picked in Overview, then a ?symbol= deep link.
+    default = st.session_state.get("profile_symbol")
+    if default not in symbols:
+        qp = st.query_params.get("symbol")
+        default = qp.upper() if qp else None
+    index = symbols.index(default) if default in symbols else 0
+
+    symbol = st.selectbox("Select asset", symbols, index=index, key="profile_select")
+    st.session_state["profile_symbol"] = symbol
+    st.query_params["symbol"] = symbol
+
+    st.markdown("<div style='margin-top:8px;'></div>", unsafe_allow_html=True)
+    render_profile(symbol)
+
+
 def render_overview_tab(df: pd.DataFrame) -> None:
     _section_header(
         "Market Overview",
@@ -683,11 +1038,27 @@ def render_overview_tab(df: pd.DataFrame) -> None:
         c = RISK_COLORS.get(val, "")
         return f"color:{c}; font-weight:700;" if c else ""
 
-    st.dataframe(
+    st.caption("Select a row to open that asset's full profile below.")
+    event = st.dataframe(
         display.style.map(_color_risk, subset=["Risk Level"]),
         use_container_width=True,
         hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="overview_table",
     )
+
+    try:
+        selected_rows = event.selection["rows"]
+    except (AttributeError, KeyError, TypeError):
+        selected_rows = []
+
+    if selected_rows:
+        sel_symbol = filtered.iloc[selected_rows[0]]["symbol"]
+        st.session_state["profile_symbol"] = sel_symbol
+        st.query_params["symbol"] = sel_symbol
+        st.divider()
+        render_profile(sel_symbol)
 
 
 def render_supply_tab(df: pd.DataFrame) -> None:
@@ -1038,8 +1409,9 @@ def main() -> None:
     render_header(overview_df)
     render_market_changes(load_market_changes())
 
-    tab_overview, tab_supply, tab_peg, tab_risk, tab_api = st.tabs([
+    tab_overview, tab_profile, tab_supply, tab_peg, tab_risk, tab_api = st.tabs([
         "Overview",
+        "Asset Profile",
         "Supply",
         "Peg Deviation",
         "Risk Scores",
@@ -1048,6 +1420,8 @@ def main() -> None:
 
     with tab_overview:
         render_overview_tab(overview_df)
+    with tab_profile:
+        render_profile_tab(overview_df)
     with tab_supply:
         render_supply_tab(scores_df)
     with tab_peg:
