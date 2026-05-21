@@ -111,6 +111,31 @@ class RiskScore(Base):
         return {c.key: getattr(self, c.key) for c in self.__table__.columns}
 
 
+class RiskEvent(Base):
+    """A notable, time-stamped risk change detected by the scheduled jobs.
+
+    Rows are append-only and de-duplicated on (symbol, event_type, triggered_at,
+    metric_name) so re-running detection over unchanged data is a no-op.
+    System-level events (e.g. API_FAILURE) use ``symbol = "SYSTEM"``.
+    """
+
+    __tablename__ = "risk_events"
+
+    id             = Column(Integer, primary_key=True, autoincrement=True)
+    symbol         = Column(String, nullable=False)
+    event_type     = Column(String, nullable=False)   # PEG_DEVIATION, LIQUIDITY_DROP, ...
+    severity       = Column(String, nullable=False)    # low | medium | high
+    title          = Column(String, nullable=False)
+    description    = Column(Text)
+    metric_name    = Column(String)
+    previous_value = Column(Float)
+    current_value  = Column(Float)
+    triggered_at   = Column(DateTime, nullable=False)
+
+    def to_dict(self) -> dict:
+        return {c.key: getattr(self, c.key) for c in self.__table__.columns}
+
+
 class ApiRequestLog(Base):
     __tablename__ = "api_request_log"
 

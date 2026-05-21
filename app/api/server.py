@@ -30,6 +30,26 @@ def get_market_changes(limit: int = Query(default=20, le=100)) -> list[dict]:
     return compute_market_changes(limit=limit)
 
 
+@app.get("/risk-events")
+def list_risk_events(
+    symbol: str | None = Query(default=None),
+    severity: str | None = Query(default=None),
+    event_type: str | None = Query(default=None),
+    limit: int = Query(default=100, le=500),
+) -> list[dict]:
+    """Risk-event timeline, newest first, optionally filtered.
+
+    Filter by ``symbol``, ``severity`` (low/medium/high), and ``event_type``
+    (PEG_DEVIATION, LIQUIDITY_DROP, SUPPLY_SHOCK, SCORE_CHANGE, RESERVE_STALE,
+    API_FAILURE). Returns an empty list when nothing matches.
+    """
+    from services.risk_events import query_events
+
+    return query_events(
+        symbol=symbol, severity=severity, event_type=event_type, limit=limit
+    )
+
+
 @app.get("/stablecoins/{symbol}")
 def get_stablecoin(symbol: str) -> dict:
     with get_session() as session:
@@ -63,6 +83,14 @@ def get_prices(symbol: str, limit: int = Query(default=288, le=1440)) -> list[di
             .limit(limit)
         ).scalars().all()
         return [r.to_dict() for r in rows]
+
+
+@app.get("/stablecoins/{symbol}/events")
+def get_stablecoin_events(symbol: str, limit: int = Query(default=100, le=500)) -> list[dict]:
+    """Risk-event timeline for a single asset, newest first."""
+    from services.risk_events import query_events
+
+    return query_events(symbol=symbol, limit=limit)
 
 
 @app.get("/stablecoins/{symbol}/profile")

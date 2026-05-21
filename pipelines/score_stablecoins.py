@@ -103,6 +103,16 @@ def run() -> None:
 
     logger.info("scoring_complete count=%d", len(scores))
 
+    # Detect and log notable risk changes from the freshly-scored data. Kept
+    # best-effort so a detection bug can never fail the scoring run itself.
+    try:
+        from services.risk_events import log_new_events
+
+        events = log_new_events(now=now)
+        logger.info("risk_events_logged count=%d", len(events))
+    except Exception as exc:  # noqa: BLE001 - detection is non-critical
+        logger.warning("risk_event_detection_failed error=%s", exc)
+
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)

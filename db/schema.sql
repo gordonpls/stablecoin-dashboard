@@ -59,6 +59,25 @@ CREATE TABLE IF NOT EXISTS risk_scores (
 CREATE INDEX IF NOT EXISTS idx_scores_symbol_time
     ON risk_scores(symbol, scored_at DESC);
 
+CREATE TABLE IF NOT EXISTS risk_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol          TEXT NOT NULL,          -- stablecoin ticker, or "SYSTEM" for global events
+    event_type      TEXT NOT NULL,          -- PEG_DEVIATION | LIQUIDITY_DROP | SUPPLY_SHOCK | SCORE_CHANGE | RESERVE_STALE | API_FAILURE
+    severity        TEXT NOT NULL,          -- low | medium | high
+    title           TEXT NOT NULL,
+    description     TEXT,
+    metric_name     TEXT,
+    previous_value  REAL,
+    current_value   REAL,
+    triggered_at    TIMESTAMP NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_risk_events_time
+    ON risk_events(triggered_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_risk_events_symbol_time
+    ON risk_events(symbol, triggered_at DESC);
+
 CREATE TABLE IF NOT EXISTS api_request_log (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     provider     TEXT NOT NULL,

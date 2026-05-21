@@ -393,6 +393,13 @@ def load_data_freshness() -> dict:
     return compute_data_freshness()
 
 
+@st.cache_data(ttl=120, show_spinner=False)
+def load_risk_events(limit: int = 300) -> list[dict]:
+    from services.risk_events import query_events
+
+    return query_events(limit=limit)
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def load_api_usage() -> pd.DataFrame:
     with get_session() as session:
@@ -547,6 +554,15 @@ METRIC_LABELS = {
     "peg_deviation_bps": "Peg Deviation",
     "liquidity_usd":     "Liquidity Depth",
     "overall_score":     "Risk Score",
+}
+
+EVENT_TYPE_LABELS = {
+    "PEG_DEVIATION":  "Peg Deviation",
+    "LIQUIDITY_DROP": "Liquidity Drop",
+    "SUPPLY_SHOCK":   "Supply Shock",
+    "SCORE_CHANGE":   "Score Change",
+    "RESERVE_STALE":  "Reserve Stale",
+    "API_FAILURE":    "API Failure",
 }
 
 
@@ -1494,6 +1510,102 @@ def render_data_freshness(freshness: dict) -> None:
     st.divider()
 
 
+def _fmt_event_time(ts) -> str:
+    """Format a risk-event timestamp; accepts a datetime or an ISO string."""
+    if ts is None:
+        return "—"
+    if isinstance(ts, str):
+        try:
+            ts = datetime.fromisoformat(ts)
+        except ValueError:
+            return ts
+    return ts.strftime("%Y-%m-%d %H:%M UTC")
+
+
+def render_risk_events_tab(events: list[dict]) -> None:
+    _section_header(
+        "Risk Events",
+        "A chronological log of notable risk changes — peg breaks, liquidity "
+        "drops, supply shocks, sharp score moves, stale reserves, and provider "
+        "failures — detected automatically as the pipelines run.",
+    )
+
+    if not events:
+        _callout(
+            "No risk events recorded yet. Events are logged automatically once the "
+            "pipelines have run on at least two snapshots and a metric moves past a "
+            "stress threshold.",
+            "info",
+        )
+        return
+
+    # Client-side filters over already-loaded data — no extra queries or API cost.
+    assets = sorted({e["symbol"] for e in events})
+    types_present = [t for t in EVENT_TYPE_LABELS if any(e["event_type"] == t for e in events)]
+
+    c1, c2, c3 = st.columns([1, 2, 2])
+    with c1:
+        asset = st.selectbox("Asset", ["All"] + assets, key="re_asset")
+    with c2:
+        type_sel = st.multiselect(
+            "Event type", options=types_present, default=types_present,
+            format_func=lambda t: EVENT_TYPE_LABELS.get(t, t), key="re_types",
+        )
+    with c3:
+        sev_sel = st.multiselect(
+            "Severity", options=["high", "medium", "low"], default=["high", "medium", "low"],
+            format_func=str.capitalize, key="re_sev",
+        )
+
+    filtered = [
+        e for e in events
+        if (asset == "All" or e["symbol"] == asset)
+        and (not type_sel or e["event_type"] in type_sel)
+        and (not sev_sel or e["severity"] in sev_sel)
+    ]
+
+    if not filtered:
+        _callout("No events match the current filters.", "info")
+        return
+
+    shown = filtered[:60]
+    note = (
+        f"Showing the {len(shown)} most recent of {len(filtered)} matching events."
+        if len(filtered) > len(shown)
+        else f"Showing {len(filtered)} of {len(events)} events."
+    )
+    st.markdown(
+        f"<p style='font-size:12px; color:{C_MUTED}; margin-bottom:14px;'>{note}</p>",
+        unsafe_allow_html=True,
+    )
+
+    for e in shown:
+        color = SEVERITY_COLORS.get(e["severity"], C_BLUE)
+        type_label = EVENT_TYPE_LABELS.get(e["event_type"], e["event_type"])
+        desc = e.get("description") or ""
+        st.markdown(
+            f"<div style='border-left:3px solid {color}; background:rgba(128,128,128,0.07); "
+            f"padding:10px 16px; border-radius:0 6px 6px 0; margin-bottom:10px;'>"
+            f"<div style='display:flex; justify-content:space-between; align-items:center; "
+            f"margin-bottom:4px;'>"
+            f"<span>"
+            f"<span style='color:{color}; font-weight:800; text-transform:uppercase; "
+            f"font-size:10px; letter-spacing:0.08em; margin-right:10px;'>{e['severity']}</span>"
+            f"<span style='font-size:10px; font-weight:700; text-transform:uppercase; "
+            f"letter-spacing:0.06em; color:{C_MUTED}; border:1px solid rgba(128,128,128,0.22); "
+            f"padding:2px 8px; border-radius:999px; margin-right:8px;'>{type_label}</span>"
+            f"<span style='font-size:12px; font-weight:700;'>{e['symbol']}</span>"
+            f"</span>"
+            f"<span style='font-size:11px; color:{C_MUTED}; font-family:monospace;'>"
+            f"{_fmt_event_time(e['triggered_at'])}</span>"
+            f"</div>"
+            f"<div style='font-size:14px; font-weight:700; margin-bottom:2px;'>{e['title']}</div>"
+            f"<div style='font-size:13px; color:{C_MUTED}; line-height:1.5;'>{desc}</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+
 def render_api_tab() -> None:
     render_data_freshness(load_data_freshness())
 
@@ -1546,12 +1658,13 @@ def main() -> None:
     render_header(overview_df)
     render_market_changes(load_market_changes())
 
-    tab_overview, tab_profile, tab_supply, tab_peg, tab_risk, tab_api = st.tabs([
+    tab_overview, tab_profile, tab_supply, tab_peg, tab_risk, tab_events, tab_api = st.tabs([
         "Overview",
         "Asset Profile",
         "Supply",
         "Peg Deviation",
         "Risk Scores",
+        "Risk Events",
         "API Usage",
     ])
 
@@ -1565,6 +1678,8 @@ def main() -> None:
         render_peg_tab(scores_df)
     with tab_risk:
         render_risk_tab(scores_df)
+    with tab_events:
+        render_risk_events_tab(load_risk_events())
     with tab_api:
         render_api_tab()
 

@@ -245,7 +245,28 @@ Fallback: using cached or backup provider data
 
 ---
 
-## 4. Add a Risk Events Timeline
+## 4. Add a Risk Events Timeline  (DONE 2026-05-21)
+
+Implemented as a `risk_events` table (`db/models.py` `RiskEvent`, `db/schema.sql`)
+plus `services/risk_events.py`. `log_new_events()` detects six event types —
+`PEG_DEVIATION`, `LIQUIDITY_DROP`, `SUPPLY_SHOCK`, `SCORE_CHANGE`,
+`RESERVE_STALE`, `API_FAILURE` — by comparing the two most recent snapshots of
+each metric (step-change semantics), and is called automatically at the end of
+the scoring pipeline (`pipelines/score_stablecoins.py`). Detection is
+idempotent: events de-duplicate on `(symbol, event_type, triggered_at,
+metric_name)`, so re-running over unchanged data inserts nothing. Exposed via
+`GET /risk-events` (filterable by symbol/severity/event_type) and
+`GET /stablecoins/{symbol}/events`, and surfaced as a new "Risk Events" tab
+with client-side asset/type/severity filters and a severity-coloured timeline.
+Tests in `tests/test_risk_events.py`.
+
+Remaining / follow-ups:
+- Wire the latest events per asset into the Asset Profile page (the profile
+  spec in #2 listed "Latest alerts or risk events" but it was not built).
+- `SCORE_CHANGE` currently compares consecutive 10-minute score snapshots; a
+  longer comparison window (e.g. 24h) may better match user intuition for
+  "score changed by 10 points".
+- Regime transitions (#6) should emit `risk_events` rows once regimes exist.
 
 ### Objective
 
