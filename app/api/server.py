@@ -92,3 +92,16 @@ def provider_usage() -> dict:
             .group_by(ApiRequestLog.provider)
         ).all()
         return {r.provider: r.calls for r in rows}
+
+
+@app.get("/data-freshness")
+def data_freshness() -> dict:
+    """System-wide freshness per data source and per provider.
+
+    Each source reports its last update, age, expected cadence, and a status
+    (fresh / delayed / stale / missing); ``overall_status`` is the worst of
+    them. Always returns a structured object, even on a brand-new database.
+    """
+    from services.freshness import compute_data_freshness
+
+    return compute_data_freshness()

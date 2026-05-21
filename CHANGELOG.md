@@ -1,2 +1,3 @@
 - 2026-05-21: Add Market Changes summary — services/market_changes.py, GET /stablecoins/changes endpoint, top-level dashboard section, and tests/test_market_changes.py.
 - 2026-05-21: Add stablecoin profile pages — services/profile.py, GET /stablecoins/{symbol}/profile endpoint, new "Asset Profile" tab + clickable overview rows (price/supply/chains/liquidity/scores/reserves/freshness, deep-linkable via ?symbol=), and tests/test_profile.py.
+- 2026-05-21: Add system-wide data freshness — services/freshness.py (compute_data_freshness), GET /data-freshness endpoint, and a "Data Freshness" panel in the API Usage tab showing per-source status (fresh/delayed/stale/missing), per-provider request health, and stale/failing warnings. Tests in tests/test_freshness.py.

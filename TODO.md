@@ -184,7 +184,24 @@ The current dashboard is useful for comparison. A profile page is better for res
 
 ---
 
-## 3. Add Confidence and Freshness Indicators
+## 3. Add Confidence and Freshness Indicators  (DONE 2026-05-21)
+
+Implemented in `services/freshness.py` (`compute_data_freshness`), exposed via
+`GET /data-freshness`, and surfaced as a "Data Freshness" section at the top of
+the API Usage tab. Reports, for each source (prices, liquidity, scores, supply,
+reserves): last update, age, expected cadence, `fresh`/`delayed`/`stale`/
+`missing` status, and assets covered — plus an `overall_status` (worst source)
+and a per-provider request-health table (`healthy`/`failing`/`missing` from
+`api_request_log`). The dashboard warns when any source is stale/missing or a
+provider's last request errored. Per-asset freshness already lived in
+`services/profile.py`; this adds the global view. Tests in
+`tests/test_freshness.py`.
+
+Remaining from the original spec (not yet built): an explicit `cached_fallback`
+status and a "fallback in use" warning tied to which provider actually served
+each data point — that depends on per-row source tracking and belongs with
+task #14 (Provider Fallback Status). The `failing` provider signal here is a
+first step toward it.
 
 ### Objective
 
@@ -852,7 +869,7 @@ These are the highest-value next tasks for an AI coding agent:
 
 1. ~~Implement `Market Changes Summary`.~~ (DONE 2026-05-21)
 2. ~~Implement stablecoin profile pages.~~ (DONE 2026-05-21)
-3. Add metric-level freshness and confidence indicators.
+3. ~~Add metric-level freshness and confidence indicators.~~ (DONE 2026-05-21 — `/data-freshness` + Data Freshness panel)
 4. Add `pipeline_runs` table and job run history UI.
 5. Add data validation warnings.
 6. Add provider fallback status visibility.

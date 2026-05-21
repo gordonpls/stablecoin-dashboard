@@ -386,6 +386,13 @@ def load_profile(symbol: str) -> dict | None:
     return get_stablecoin_profile(symbol)
 
 
+@st.cache_data(ttl=120, show_spinner=False)
+def load_data_freshness() -> dict:
+    from services.freshness import compute_data_freshness
+
+    return compute_data_freshness()
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def load_api_usage() -> pd.DataFrame:
     with get_session() as session:
@@ -635,6 +642,10 @@ STATUS_LABELS = {
     "missing": "No data",
 }
 FRESHNESS_SOURCES = [("price", "Price"), ("supply", "Supply"), ("scores", "Scores"), ("reserve", "Reserve")]
+
+# Per-provider request health (distinct from the per-source freshness statuses).
+PROVIDER_STATUS_COLORS = {"healthy": C_GREEN, "failing": C_RED, "missing": C_MUTED}
+PROVIDER_STATUS_LABELS = {"healthy": "Healthy", "failing": "Failing", "missing": "No calls"}
 
 
 def _fmt_age(age_seconds: float | None) -> str:
@@ -1359,7 +1370,133 @@ Risk levels: **Low Risk** 80+  ·  **Moderate** 60–79  ·  **Elevated** 40–5
     )
 
 
+def _fmt_cadence(secs: int | None) -> str:
+    if not secs:
+        return "—"
+    if secs % 3600 == 0:
+        hours = secs // 3600
+        return f"{hours}h" if hours > 1 else "1h"
+    return f"{secs // 60} min"
+
+
+def _age_from_iso(iso_ts: str | None) -> str:
+    """Plain-language age from an ISO timestamp string (for provider rows)."""
+    if not iso_ts:
+        return "—"
+    try:
+        ts = datetime.fromisoformat(iso_ts)
+    except ValueError:
+        return "—"
+    return _fmt_age((datetime.utcnow() - ts).total_seconds())
+
+
+def render_data_freshness(freshness: dict) -> None:
+    _section_header(
+        "Data Freshness",
+        "How current each data source is, measured against how often it is expected to refresh. "
+        "Green is fresh, amber means one missed refresh, red means stale or unavailable.",
+    )
+
+    sources = freshness.get("sources", [])
+    if not sources:
+        _callout("No data sources are reporting yet. Run the ingestion pipelines first.", "info")
+        return
+
+    # Warn up front when anything is stale or has never reported.
+    bad = [s for s in sources if s["status"] in ("stale", "missing")]
+    if bad:
+        names = ", ".join(s["label"] for s in bad)
+        verb = "is" if len(bad) == 1 else "are"
+        _callout(
+            f"<strong>Heads up:</strong> {names} {verb} stale or unavailable — "
+            "figures drawn from these sources may be out of date.",
+            "warning",
+        )
+
+    # Per-source status pills.
+    chips = []
+    for s in sources:
+        status = s["status"]
+        color = STATUS_COLORS.get(status, C_MUTED)
+        status_txt = STATUS_LABELS.get(status, status)
+        age_txt = "" if status == "missing" else f" · {_fmt_age(s.get('age_seconds'))}"
+        chips.append(
+            f"<span style='display:inline-flex; align-items:center; gap:7px; "
+            f"padding:6px 12px; margin:0 8px 8px 0; border-radius:999px; "
+            f"border:1px solid rgba(128,128,128,0.18); font-size:12px;'>"
+            f"<span style='width:8px;height:8px;border-radius:50%;background:{color};'></span>"
+            f"<span style='color:{C_MUTED};'>{s['label']}</span>"
+            f"<span style='font-weight:700;color:{color};'>{status_txt}{age_txt}</span>"
+            f"</span>"
+        )
+    st.markdown("<div style='margin-bottom:14px;'>" + "".join(chips) + "</div>", unsafe_allow_html=True)
+
+    source_table = pd.DataFrame([
+        {
+            "Source":       s["label"],
+            "Provider":     s["provider"],
+            "Tracks":       s["metric"],
+            "Status":       STATUS_LABELS.get(s["status"], s["status"]),
+            "Last Updated": _fmt_age(s.get("age_seconds")) if s["status"] != "missing" else "Never",
+            "Expected Every": _fmt_cadence(s.get("expected_cadence_seconds")),
+            "Assets":       s.get("assets_covered", 0),
+        }
+        for s in sources
+    ])
+
+    def _color_status(val: str) -> str:
+        key = {v: k for k, v in STATUS_LABELS.items()}.get(val)
+        c = STATUS_COLORS.get(key, "")
+        return f"color:{c}; font-weight:700;" if c else ""
+
+    st.dataframe(
+        source_table.style.map(_color_status, subset=["Status"]),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    # Provider request health.
+    providers = freshness.get("providers", [])
+    if providers:
+        st.markdown("<div style='margin-top:18px;'></div>", unsafe_allow_html=True)
+        st.markdown("##### Provider request health")
+        failing = [p for p in providers if p["status"] == "failing"]
+        if failing:
+            names = ", ".join(p["provider"] for p in failing)
+            _callout(
+                f"<strong>{names}</strong> last returned an error. The dashboard falls back to "
+                "cached or alternate data, but live values from these providers may be missing.",
+                "danger",
+            )
+        prov_table = pd.DataFrame([
+            {
+                "Provider":     p["provider"],
+                "Status":       PROVIDER_STATUS_LABELS.get(p["status"], p["status"]),
+                "Last Request": _age_from_iso(p.get("last_request_at")),
+                "Last Status":  p.get("last_status_code") if p.get("last_status_code") is not None else "—",
+                "Total Calls":  p.get("total_requests", 0),
+                "Errors":       p.get("error_count", 0),
+            }
+            for p in providers
+        ])
+
+        def _color_prov(val: str) -> str:
+            key = {v: k for k, v in PROVIDER_STATUS_LABELS.items()}.get(val)
+            c = PROVIDER_STATUS_COLORS.get(key, "")
+            return f"color:{c}; font-weight:700;" if c else ""
+
+        st.dataframe(
+            prov_table.style.map(_color_prov, subset=["Status"]),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.divider()
+
+
 def render_api_tab() -> None:
+    render_data_freshness(load_data_freshness())
+
     _section_header(
         "API Usage",
         "All data is sourced from free public APIs. No paid tier is used.",
