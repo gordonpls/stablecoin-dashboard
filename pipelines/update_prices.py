@@ -39,7 +39,10 @@ async def _fetch_and_store(symbols: list[str] | None = None) -> int:
 
 def run(symbols: list[str] | None = None) -> None:
     init_db()
-    asyncio.run(_fetch_and_store(symbols))
+    from services.pipeline_runs import record_run
+
+    with record_run("update_prices") as rec:
+        rec.rows_written = asyncio.run(_fetch_and_store(symbols))
 
 
 if __name__ == "__main__":

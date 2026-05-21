@@ -53,7 +53,10 @@ async def _fetch_and_store() -> int:
 
 def run() -> None:
     init_db()
-    asyncio.run(_fetch_and_store())
+    from services.pipeline_runs import record_run
+
+    with record_run("update_supply") as rec:
+        rec.rows_written = asyncio.run(_fetch_and_store())
 
 
 if __name__ == "__main__":

@@ -151,6 +151,29 @@ class ApiRequestLog(Base):
         return {c.key: getattr(self, c.key) for c in self.__table__.columns}
 
 
+class PipelineRun(Base):
+    """One execution of an ingestion/scoring pipeline.
+
+    Rows are append-only and written by ``services.pipeline_runs.record_run``
+    on every pipeline run (success or failure), so the dashboard and admins can
+    see whether the data jobs are actually working and when each last succeeded.
+    """
+
+    __tablename__ = "pipeline_runs"
+
+    id               = Column(Integer, primary_key=True, autoincrement=True)
+    pipeline_name    = Column(String, nullable=False)
+    started_at       = Column(DateTime, nullable=False)
+    finished_at      = Column(DateTime)
+    status           = Column(String, nullable=False)   # success | error
+    rows_written     = Column(Integer, default=0)
+    error_message    = Column(Text)
+    duration_seconds = Column(Float)
+
+    def to_dict(self) -> dict:
+        return {c.key: getattr(self, c.key) for c in self.__table__.columns}
+
+
 @contextmanager
 def get_session() -> Generator[Session, None, None]:
     with Session(engine) as session:

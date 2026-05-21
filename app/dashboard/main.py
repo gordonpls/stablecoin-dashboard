@@ -400,6 +400,16 @@ def load_risk_events(limit: int = 300) -> list[dict]:
     return query_events(limit=limit)
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def load_pipeline_runs(limit: int = 100) -> dict:
+    from services.pipeline_runs import pipeline_status_summary, query_runs
+
+    return {
+        "summary": pipeline_status_summary(),
+        "runs": query_runs(limit=limit),
+    }
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def load_api_usage() -> pd.DataFrame:
     with get_session() as session:
@@ -1606,8 +1616,127 @@ def render_risk_events_tab(events: list[dict]) -> None:
         )
 
 
+PIPELINE_LABELS = {
+    "update_supply":     "Supply",
+    "update_prices":     "Prices",
+    "update_liquidity":  "Liquidity",
+    "update_reserves":   "Reserves",
+    "score_stablecoins": "Risk Scores",
+}
+
+# Pipeline run status → colour / label (distinct from the freshness statuses).
+RUN_STATUS_COLORS = {"success": C_GREEN, "error": C_RED}
+RUN_STATUS_LABELS = {"success": "Success", "error": "Failed"}
+
+
+def _fmt_duration(secs: float | None) -> str:
+    if secs is None:
+        return "—"
+    if secs < 1:
+        return f"{secs * 1000:.0f} ms"
+    if secs < 60:
+        return f"{secs:.1f}s"
+    return f"{int(secs // 60)}m {int(secs % 60)}s"
+
+
+def render_pipeline_runs(data: dict) -> None:
+    _section_header(
+        "Pipeline Runs",
+        "Every data job logs each run here — so you can confirm the pipelines are "
+        "working and see when each last succeeded. Failed runs are flagged.",
+    )
+
+    summary = data.get("summary", [])
+    runs = data.get("runs", [])
+
+    if not summary:
+        _callout(
+            "No pipeline runs recorded yet. Runs are logged automatically each time "
+            "a pipeline executes (on auto-refresh or manual refresh).",
+            "info",
+        )
+        return
+
+    # Callout for any pipeline whose most recent run failed.
+    failed = [s for s in summary if s.get("last_status") == "error"]
+    if failed:
+        names = ", ".join(PIPELINE_LABELS.get(s["pipeline_name"], s["pipeline_name"]) for s in failed)
+        verb = "pipeline's last run" if len(failed) == 1 else "pipelines' last runs"
+        _callout(
+            f"<strong>{names}</strong> — {verb} failed. The data behind these jobs may be "
+            "stale until the next successful run. See the error in the table below.",
+            "danger",
+        )
+
+    # Per-pipeline status pills.
+    chips = []
+    for s in summary:
+        status = s.get("last_status") or "missing"
+        color = RUN_STATUS_COLORS.get(status, C_MUTED)
+        status_txt = RUN_STATUS_LABELS.get(status, "No runs")
+        age_txt = f" · {_age_from_iso(s.get('last_run_at'))}" if s.get("last_run_at") else ""
+        label = PIPELINE_LABELS.get(s["pipeline_name"], s["pipeline_name"])
+        chips.append(
+            f"<span style='display:inline-flex; align-items:center; gap:7px; "
+            f"padding:6px 12px; margin:0 8px 8px 0; border-radius:999px; "
+            f"border:1px solid rgba(128,128,128,0.18); font-size:12px;'>"
+            f"<span style='width:8px;height:8px;border-radius:50%;background:{color};'></span>"
+            f"<span style='color:{C_MUTED};'>{label}</span>"
+            f"<span style='font-weight:700;color:{color};'>{status_txt}{age_txt}</span>"
+            f"</span>"
+        )
+    st.markdown("<div style='margin-bottom:14px;'>" + "".join(chips) + "</div>", unsafe_allow_html=True)
+
+    summary_table = pd.DataFrame([
+        {
+            "Pipeline":     PIPELINE_LABELS.get(s["pipeline_name"], s["pipeline_name"]),
+            "Last Status":  RUN_STATUS_LABELS.get(s.get("last_status"), "No runs"),
+            "Last Run":     _age_from_iso(s.get("last_run_at")),
+            "Last Success": _age_from_iso(s.get("last_success_at")) if s.get("last_success_at") else "Never",
+            "Rows":         s.get("last_rows_written") if s.get("last_rows_written") is not None else "—",
+            "Duration":     _fmt_duration(s.get("last_duration_seconds")),
+            "Failures (24h)": s.get("recent_failures", 0),
+        }
+        for s in summary
+    ])
+
+    def _color_run_status(val: str) -> str:
+        key = {v: k for k, v in RUN_STATUS_LABELS.items()}.get(val)
+        c = RUN_STATUS_COLORS.get(key, "")
+        return f"color:{c}; font-weight:700;" if c else ""
+
+    st.dataframe(
+        summary_table.style.map(_color_run_status, subset=["Last Status"]),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    if runs:
+        with st.expander(f"Recent runs ({len(runs)})"):
+            runs_table = pd.DataFrame([
+                {
+                    "Pipeline": PIPELINE_LABELS.get(r["pipeline_name"], r["pipeline_name"]),
+                    "Status":   RUN_STATUS_LABELS.get(r.get("status"), r.get("status")),
+                    "Started":  _fmt_event_time(r.get("started_at")),
+                    "Duration": _fmt_duration(r.get("duration_seconds")),
+                    "Rows":     r.get("rows_written") if r.get("rows_written") is not None else "—",
+                    "Error":    r.get("error_message") or "",
+                }
+                for r in runs
+            ])
+            st.dataframe(
+                runs_table.style.map(_color_run_status, subset=["Status"]),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    st.divider()
+
+
 def render_api_tab() -> None:
     render_data_freshness(load_data_freshness())
+
+    render_pipeline_runs(load_pipeline_runs())
 
     _section_header(
         "API Usage",

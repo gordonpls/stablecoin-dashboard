@@ -122,6 +122,27 @@ def provider_usage() -> dict:
         return {r.provider: r.calls for r in rows}
 
 
+@app.get("/pipeline-runs")
+def pipeline_runs(
+    pipeline: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    limit: int = Query(default=100, le=500),
+) -> dict:
+    """Pipeline execution history plus a per-pipeline health summary.
+
+    ``summary`` has one entry per pipeline (last status, last run, last
+    success, recent failures); ``runs`` is the newest-first run log, optionally
+    filtered by ``pipeline`` name and ``status`` (success/error). Always returns
+    a structured object, even on a brand-new database.
+    """
+    from services.pipeline_runs import pipeline_status_summary, query_runs
+
+    return {
+        "summary": pipeline_status_summary(),
+        "runs": query_runs(pipeline_name=pipeline, status=status, limit=limit),
+    }
+
+
 @app.get("/data-freshness")
 def data_freshness() -> dict:
     """System-wide freshness per data source and per provider.

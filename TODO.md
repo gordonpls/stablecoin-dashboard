@@ -590,7 +590,27 @@ Prevent bad deployments before hosting the dashboard publicly or privately.
 
 ---
 
-## 12. Add Job Run History
+## 12. Add Job Run History  (DONE 2026-05-21)
+
+Implemented as a `pipeline_runs` table (`db/models.py` `PipelineRun`,
+`db/schema.sql`) plus `services/pipeline_runs.py`. `record_run(name)` is a
+context manager wrapped around every pipeline's `run()` (`update_supply`,
+`update_prices`, `update_liquidity`, `update_reserves`, `score_stablecoins`):
+it captures start/finish time, duration, status (`success`/`error`),
+`rows_written` (set by the pipeline via the yielded handle), and the truncated
+error message — always persisting a row even on failure, then re-raising so
+caller behaviour is unchanged. Recording is best-effort (a logging failure
+never masks the pipeline outcome). Exposed via `GET /pipeline-runs` (returns a
+per-pipeline `summary` + filterable `runs` log) and surfaced as a "Pipeline
+Runs" section at the top of the API Usage tab: per-pipeline health pills, a
+summary table (last status / last run / last success / rows / duration / 24h
+failures), a failed-pipeline callout, and an expandable recent-runs table.
+Tests in `tests/test_pipeline_runs.py`.
+
+Follow-ups: the dashboard's freshness `failing` provider signal and this run
+history together cover most of #11 (deployment readiness) — a `/ready`
+endpoint and an expanded `/health` (last successful pipeline run, db
+connectivity) could now reuse `pipeline_status_summary()`.
 
 ### Objective
 
@@ -891,7 +911,7 @@ These are the highest-value next tasks for an AI coding agent:
 1. ~~Implement `Market Changes Summary`.~~ (DONE 2026-05-21)
 2. ~~Implement stablecoin profile pages.~~ (DONE 2026-05-21)
 3. ~~Add metric-level freshness and confidence indicators.~~ (DONE 2026-05-21 — `/data-freshness` + Data Freshness panel)
-4. Add `pipeline_runs` table and job run history UI.
+4. ~~Add `pipeline_runs` table and job run history UI.~~ (DONE 2026-05-21 — `/pipeline-runs` + Pipeline Runs panel)
 5. Add data validation warnings.
 6. Add provider fallback status visibility.
 7. Add explainable score drilldowns.

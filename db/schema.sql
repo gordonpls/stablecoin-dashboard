@@ -90,3 +90,20 @@ CREATE TABLE IF NOT EXISTS api_request_log (
 
 CREATE INDEX IF NOT EXISTS idx_log_provider_time
     ON api_request_log(provider, requested_at DESC);
+
+CREATE TABLE IF NOT EXISTS pipeline_runs (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    pipeline_name    TEXT NOT NULL,         -- e.g. update_supply, score_stablecoins
+    started_at       TIMESTAMP NOT NULL,
+    finished_at      TIMESTAMP,
+    status           TEXT NOT NULL,         -- success | error
+    rows_written     INTEGER DEFAULT 0,
+    error_message    TEXT,
+    duration_seconds REAL
+);
+
+CREATE INDEX IF NOT EXISTS idx_pipeline_runs_name_time
+    ON pipeline_runs(pipeline_name, started_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_pipeline_runs_time
+    ON pipeline_runs(started_at DESC);

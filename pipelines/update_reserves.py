@@ -40,18 +40,22 @@ KNOWN_REPORTS: list[dict] = [
 
 def run() -> None:
     init_db()
-    with get_session() as session:
-        for r in KNOWN_REPORTS:
-            report_date = date.fromisoformat(r["report_date"]) if r.get("report_date") else None
-            session.add(ReserveReport(
-                symbol=r["symbol"],
-                report_url=r.get("report_url"),
-                report_date=report_date,
-                composition=r.get("composition"),
-                auditor=r.get("auditor"),
-            ))
-        session.commit()
-    logger.info("reserves_updated count=%d", len(KNOWN_REPORTS))
+    from services.pipeline_runs import record_run
+
+    with record_run("update_reserves") as rec:
+        with get_session() as session:
+            for r in KNOWN_REPORTS:
+                report_date = date.fromisoformat(r["report_date"]) if r.get("report_date") else None
+                session.add(ReserveReport(
+                    symbol=r["symbol"],
+                    report_url=r.get("report_url"),
+                    report_date=report_date,
+                    composition=r.get("composition"),
+                    auditor=r.get("auditor"),
+                ))
+            session.commit()
+        rec.rows_written = len(KNOWN_REPORTS)
+        logger.info("reserves_updated count=%d", len(KNOWN_REPORTS))
 
 
 if __name__ == "__main__":

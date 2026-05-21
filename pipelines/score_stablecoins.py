@@ -51,6 +51,13 @@ def _adoption_score(supply_usd: float | None) -> float:
 
 def run() -> None:
     init_db()
+    from services.pipeline_runs import record_run
+
+    with record_run("score_stablecoins") as rec:
+        _run_scoring(rec)
+
+
+def _run_scoring(rec) -> None:
     now = datetime.utcnow()
     cutoff = now - timedelta(hours=2)
 
@@ -101,6 +108,7 @@ def run() -> None:
         session.add_all(scores)
         session.commit()
 
+    rec.rows_written = len(scores)
     logger.info("scoring_complete count=%d", len(scores))
 
     # Detect and log notable risk changes from the freshly-scored data. Kept
