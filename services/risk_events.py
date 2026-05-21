@@ -30,12 +30,14 @@ from sqlalchemy import func, select
 from db.models import (
     ApiRequestLog,
     PriceSnapshot,
+    RegimeSnapshot,
     ReserveReport,
     RiskEvent,
     RiskScore,
     SupplySnapshot,
     get_session,
 )
+from services.regimes import HIGH_RISK, REGIME_RANK, STABLE
 
 # ── event types ───────────────────────────────────────────────────────────────
 
@@ -45,10 +47,11 @@ SUPPLY_SHOCK = "SUPPLY_SHOCK"
 SCORE_CHANGE = "SCORE_CHANGE"
 RESERVE_STALE = "RESERVE_STALE"
 API_FAILURE = "API_FAILURE"
+REGIME_CHANGE = "REGIME_CHANGE"
 
 EVENT_TYPES = (
     PEG_DEVIATION, LIQUIDITY_DROP, SUPPLY_SHOCK,
-    SCORE_CHANGE, RESERVE_STALE, API_FAILURE,
+    SCORE_CHANGE, RESERVE_STALE, API_FAILURE, REGIME_CHANGE,
 )
 SEVERITIES = ("low", "medium", "high")
 
@@ -279,6 +282,49 @@ def _detect_reserve_stale(session, now: datetime) -> list[RiskEvent]:
     return events
 
 
+def _detect_regime(session) -> list[RiskEvent]:
+    """Emit an event when an asset moves between risk regimes.
+
+    Reads the two most recent ``RegimeSnapshot`` rows per symbol. Because
+    ``services.regimes`` records a snapshot only when the regime changes, those
+    two rows are by construction a transition; ``triggered_at`` is the newer
+    snapshot's timestamp, so re-detecting an unchanged regime is a no-op.
+    """
+    events: list[RiskEvent] = []
+    for symbol in _symbols(session, RegimeSnapshot.symbol):
+        rows = (
+            session.execute(
+                select(RegimeSnapshot)
+                .where(RegimeSnapshot.symbol == symbol)
+                .order_by(RegimeSnapshot.classified_at.desc(), RegimeSnapshot.id.desc())
+                .limit(2)
+            )
+            .scalars()
+            .all()
+        )
+        if len(rows) < 2:
+            continue  # only an initial classification — not a transition
+        cur, prev = rows[0], rows[1]
+        if cur.regime == prev.regime:
+            continue  # defensive: regimes only stores changes, but never re-log
+        worsened = REGIME_RANK.get(cur.regime, 0) > REGIME_RANK.get(prev.regime, 0)
+        verb = "deteriorated to" if worsened else "improved to"
+        severity = "high" if cur.regime == HIGH_RISK else "low" if cur.regime == STABLE else "medium"
+        reason = f" ({cur.reason})" if cur.reason else ""
+        events.append(RiskEvent(
+            symbol=symbol, event_type=REGIME_CHANGE, severity=severity,
+            title=f"{symbol} {verb} {cur.regime}",
+            description=(
+                f"Risk regime moved from {prev.regime} to {cur.regime}{reason}."
+            ),
+            metric_name="risk_regime",
+            previous_value=float(REGIME_RANK.get(prev.regime, 0)),
+            current_value=float(REGIME_RANK.get(cur.regime, 0)),
+            triggered_at=cur.classified_at,
+        ))
+    return events
+
+
 def _detect_api_failures(session, now: datetime) -> list[RiskEvent]:
     cutoff = now - API_FAILURE_WINDOW
     failing = (ApiRequestLog.status_code.is_(None)) | (ApiRequestLog.status_code >= 400)
@@ -337,6 +383,7 @@ def log_new_events(now: datetime | None = None) -> list[dict]:
             + _detect_supply(session)
             + _detect_score(session)
             + _detect_reserve_stale(session, now)
+            + _detect_regime(session)
             + _detect_api_failures(session, now)
         )
         for ev in candidates:

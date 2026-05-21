@@ -50,6 +50,19 @@ def list_risk_events(
     )
 
 
+@app.get("/regimes")
+def list_regimes() -> list[dict]:
+    """Current risk regime per asset, most severe first.
+
+    Each entry is the asset's latest regime classification (Stable, Mild stress,
+    Peg stress, Liquidity stress, Data quality concern, or High risk) with the
+    score and peg that drove it. Empty list until the scoring pipeline has run.
+    """
+    from services.regimes import current_regimes
+
+    return current_regimes()
+
+
 @app.get("/stablecoins/{symbol}")
 def get_stablecoin(symbol: str) -> dict:
     with get_session() as session:
@@ -107,6 +120,19 @@ def get_score_explanation(symbol: str) -> dict:
     if explanation is None:
         raise HTTPException(status_code=404, detail=f"No scores for {symbol}")
     return explanation
+
+
+@app.get("/stablecoins/{symbol}/regime")
+def get_regime(symbol: str, history_limit: int = Query(default=100, le=500)) -> dict:
+    """Current risk regime and transition history for one asset.
+
+    Always 200: ``current`` is null and ``history`` empty when the asset has not
+    been classified yet, so the dashboard can show "not classified" explicitly
+    rather than erroring.
+    """
+    from services.regimes import get_regime_detail
+
+    return get_regime_detail(symbol, history_limit=history_limit)
 
 
 @app.get("/stablecoins/{symbol}/profile")

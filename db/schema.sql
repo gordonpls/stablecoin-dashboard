@@ -78,6 +78,20 @@ CREATE INDEX IF NOT EXISTS idx_risk_events_time
 CREATE INDEX IF NOT EXISTS idx_risk_events_symbol_time
     ON risk_events(symbol, triggered_at DESC);
 
+CREATE TABLE IF NOT EXISTS regime_snapshots (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol            TEXT NOT NULL,
+    regime            TEXT NOT NULL,      -- Stable | Mild stress | Peg stress | Liquidity stress | Data quality concern | High risk
+    severity          TEXT NOT NULL,      -- low | medium | high
+    reason            TEXT,
+    overall_score     REAL,
+    peg_deviation_bps REAL,
+    classified_at     TIMESTAMP NOT NULL  -- only written when the regime changes
+);
+
+CREATE INDEX IF NOT EXISTS idx_regime_symbol_time
+    ON regime_snapshots(symbol, classified_at DESC);
+
 CREATE TABLE IF NOT EXISTS data_quality_warnings (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     symbol       TEXT,                  -- stablecoin ticker, or NULL for non-asset warnings

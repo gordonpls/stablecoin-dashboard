@@ -127,6 +127,17 @@ def _run_scoring(rec) -> None:
     rec.rows_written = len(scores)
     logger.info("scoring_complete count=%d", len(scores))
 
+    # Classify each asset into a risk regime and append a transition snapshot
+    # when it changes. Done before event detection so a fresh transition is
+    # available for the REGIME_CHANGE detector. Best-effort, like the steps below.
+    try:
+        from services.regimes import record_regimes
+
+        transitions = record_regimes(now=now)
+        logger.info("regimes_recorded count=%d", len(transitions))
+    except Exception as exc:  # noqa: BLE001 - regime recording is non-critical
+        logger.warning("regime_recording_failed error=%s", exc)
+
     # Detect and log notable risk changes from the freshly-scored data. Kept
     # best-effort so a detection bug can never fail the scoring run itself.
     try:

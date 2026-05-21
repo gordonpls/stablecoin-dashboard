@@ -386,7 +386,35 @@ A score is only useful if users understand the inputs behind it.
 
 ---
 
-## 6. Add Historical Risk Regime Labels
+## 6. Add Historical Risk Regime Labels  (DONE 2026-05-21)
+
+Implemented in `services/regimes.py`. `classify_regime()` is a pure, deterministic
+function of the latest overall score, peg deviation (bps), liquidity-dimension
+score, and whether an active data-quality warning is open — returning one of six
+regimes: `Stable`, `Mild stress`, `Data quality concern`, `Liquidity stress`,
+`Peg stress`, `High risk`. Thresholds mirror the dashboard's `risk_label` bands
+and the `risk_events` peg thresholds, so the regime never disagrees with the
+score/peg logic shown elsewhere. `record_regimes()` (called from the scoring
+pipeline, best-effort) appends a `RegimeSnapshot` **only when an asset's regime
+changes**, so the new `regime_snapshots` table (model + `db/schema.sql`) is a
+compact, idempotent transition history. `services/risk_events.py` gained a
+`REGIME_CHANGE` event type + `_detect_regime` detector that turns each transition
+into an event (severity by destination regime; "deteriorated"/"improved"
+wording). Exposed via `GET /regimes` (current regime per asset, most severe
+first) and `GET /stablecoins/{symbol}/regime` (current + history). Surfaced as a
+colour-coded **Regime** column in the Overview table, a current-regime callout +
+**Risk Regime History** step chart on the Asset Profile, and Regime Change rows
+in the Risk Events tab. Tests in `tests/test_regimes.py`.
+
+Remaining / follow-ups:
+- The classifier uses the *latest* peg reading regardless of the price
+  staleness window; a very old price could classify on a stale peg. Consider a
+  recency cutoff (the scoring pipeline already uses a 2h price cutoff).
+- `Liquidity stress` triggers on `liquidity_score < 30` — a heuristic; tune once
+  there's real liquidity history (ties into #7).
+- Surface the current regime in the header KPI strip / a regime-distribution
+  count, and wire the latest regime + events into the profile's "Latest alerts"
+  (still open from #2 / #4).
 
 ### Objective
 

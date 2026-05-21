@@ -136,6 +136,33 @@ class RiskEvent(Base):
         return {c.key: getattr(self, c.key) for c in self.__table__.columns}
 
 
+class RegimeSnapshot(Base):
+    """The risk *regime* an asset was classified into at a point in time.
+
+    A regime is a plain-language summary of an asset's condition (e.g. ``Stable``,
+    ``Peg stress``, ``High risk``) derived deterministically from its latest score
+    and peg by ``services.regimes``. Rows are written only when the regime *changes*
+    from the previously stored one, so the table is a compact transition history:
+    the newest row is the asset's current regime, and consecutive rows are the
+    moments it moved between regimes. ``services.risk_events`` turns each
+    transition into a ``REGIME_CHANGE`` event.
+    """
+
+    __tablename__ = "regime_snapshots"
+
+    id                = Column(Integer, primary_key=True, autoincrement=True)
+    symbol            = Column(String, nullable=False)
+    regime            = Column(String, nullable=False)   # Stable | Mild stress | ...
+    severity          = Column(String, nullable=False)    # low | medium | high
+    reason            = Column(Text)
+    overall_score     = Column(Float)
+    peg_deviation_bps = Column(Float)
+    classified_at     = Column(DateTime, nullable=False)
+
+    def to_dict(self) -> dict:
+        return {c.key: getattr(self, c.key) for c in self.__table__.columns}
+
+
 class DataQualityWarning(Base):
     """A detected data-integrity problem with the stored metrics.
 

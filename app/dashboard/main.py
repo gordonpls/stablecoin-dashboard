@@ -103,6 +103,16 @@ RISK_COLORS = {
     "High Risk": C_RED,
 }
 
+# Plain-language risk regimes (services/regimes.py). Calm → severe.
+REGIME_COLORS = {
+    "Stable":               C_GREEN,
+    "Mild stress":          C_AMBER,
+    "Data quality concern": C_BLUE,
+    "Liquidity stress":     C_ORANGE,
+    "Peg stress":           C_ORANGE,
+    "High risk":            C_RED,
+}
+
 SCORE_COLORS = [C_PRIMARY, C_GREEN, C_AMBER, "#ec4899"]
 SCORE_COLS   = ["peg_score", "liquidity_score", "reserve_score", "adoption_score"]
 SCORE_LABELS = ["Peg", "Liquidity", "Reserve", "Adoption"]
@@ -250,6 +260,11 @@ def load_overview() -> pd.DataFrame:
             ).scalars().all()
         }
 
+    # Current risk regime per asset (latest classification). Read-only; falls
+    # back to "—" for assets not yet classified.
+    from services.regimes import current_regimes
+    regimes = {r["symbol"]: r for r in current_regimes()}
+
     rows = []
     for symbol, supply_row in latest_supplies.items():
         score_row = latest_scores.get(symbol)
@@ -259,6 +274,7 @@ def load_overview() -> pd.DataFrame:
         top_chain, prev_week, prev_month = _parse_chain_data(supply_row.supply_by_chain)
         supply = supply_row.circulating_supply
         price  = price_row.price if price_row else 1.0
+        regime_row = regimes.get(symbol)
         rows.append({
             "symbol":            symbol,
             "market_cap":        supply * price,
@@ -269,6 +285,7 @@ def load_overview() -> pd.DataFrame:
             "peg_deviation_bps": price_row.peg_deviation_bps if price_row else None,
             "overall_score":     score_row.overall_score,
             "risk_label":        risk_label(score_row.overall_score),
+            "regime":            regime_row["regime"] if regime_row else "—",
             "scored_at":         score_row.scored_at,
         })
 
@@ -391,6 +408,13 @@ def load_profile(symbol: str) -> dict | None:
     from services.profile import get_stablecoin_profile
 
     return get_stablecoin_profile(symbol)
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def load_regime(symbol: str) -> dict:
+    from services.regimes import get_regime_detail
+
+    return get_regime_detail(symbol)
 
 
 @st.cache_data(ttl=120, show_spinner=False)
@@ -590,6 +614,7 @@ EVENT_TYPE_LABELS = {
     "SCORE_CHANGE":   "Score Change",
     "RESERVE_STALE":  "Reserve Stale",
     "API_FAILURE":    "API Failure",
+    "REGIME_CHANGE":  "Regime Change",
 }
 
 WARNING_TYPE_LABELS = {
@@ -801,6 +826,46 @@ def _profile_history_charts(symbol: str) -> None:
         _callout("Score history appears after the pipeline has run on multiple days.", "info")
 
 
+def _render_regime_history(history: list[dict]) -> None:
+    """Step chart of an asset's regime transitions over time.
+
+    ``history`` is newest-first (each row is a change). The current regime is
+    extended to "now" so the most recent segment is visible.
+    """
+    if not history:
+        _callout("This asset has not been classified into a regime yet.", "info")
+        return
+
+    order = list(REGIME_COLORS.keys())  # calm → severe; matches services.regimes
+    pts = sorted(history, key=lambda r: r["classified_at"])
+    seq = [p["regime"] for p in pts] + [pts[-1]["regime"]]
+    xs = [p["classified_at"] for p in pts] + [datetime.utcnow()]
+    ys = [order.index(r) if r in order else 0 for r in seq]
+
+    fig = go.Figure(go.Scatter(
+        x=xs, y=ys, mode="lines+markers", line_shape="hv",
+        line=dict(color=C_PRIMARY, width=2),
+        marker=dict(size=9, color=[REGIME_COLORS.get(r, C_BLUE) for r in seq]),
+        text=seq, hovertemplate="<b>%{text}</b><br>%{x|%Y-%m-%d %H:%M} UTC<extra></extra>",
+    ))
+    fig.update_layout(**_chart_layout(
+        title="", height=260,
+        yaxis=dict(
+            tickmode="array", tickvals=list(range(len(order))), ticktext=order,
+            range=[-0.5, len(order) - 0.5], gridcolor="rgba(128,128,128,0.12)", zeroline=False,
+        ),
+        margin={"t": 20, "r": 16, "b": 40, "l": 140},
+    ))
+    st.plotly_chart(fig, use_container_width=True)
+
+    if len(pts) < 2:
+        _callout(
+            "Only one regime recorded so far — transitions will appear here as the "
+            "asset moves between regimes.",
+            "info",
+        )
+
+
 def render_profile(symbol: str) -> None:
     """Full single-asset profile: metrics, scores, history, chains, reserves.
 
@@ -870,6 +935,21 @@ def render_profile(symbol: str) -> None:
         risk if overall is not None else "Not scored yet.", risk_accent,
     ), unsafe_allow_html=True)
 
+    # ── current risk regime ───────────────────────────────────────────────────
+    regime_detail = load_regime(symbol)
+    current_regime = regime_detail.get("current")
+    if current_regime:
+        rc = REGIME_COLORS.get(current_regime["regime"], C_BLUE)
+        reason = current_regime.get("reason")
+        since = _fmt_event_time(current_regime.get("classified_at"))
+        st.markdown("<div style='margin-top:16px;'></div>", unsafe_allow_html=True)
+        _callout(
+            f"<strong style='color:{rc};'>Current regime: {current_regime['regime']}</strong>"
+            + (f" — {reason}" if reason else "")
+            + f"<span style='color:{C_MUTED}; font-size:12px;'> · since {since}</span>",
+            "danger" if current_regime["severity"] == "high" else "info",
+        )
+
     st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
 
     # ── score breakdown ───────────────────────────────────────────────────────
@@ -921,6 +1001,14 @@ def render_profile(symbol: str) -> None:
     # ── history ───────────────────────────────────────────────────────────────
     _section_header("History", "How this asset's price, supply, and risk scores have moved over time.")
     _profile_history_charts(symbol)
+
+    st.markdown("<div style='margin-top:8px;'></div>", unsafe_allow_html=True)
+    _section_header(
+        "Risk Regime History",
+        "The plain-language risk regime this asset has occupied over time. Each "
+        "step is a transition, also logged as a Regime Change in the Risk Events tab.",
+    )
+    _render_regime_history(regime_detail.get("history", []))
 
     st.divider()
 
@@ -1064,6 +1152,7 @@ def render_overview_tab(df: pd.DataFrame) -> None:
 | **Peg Deviation** | Distance from $1.00, in basis points. 1 bps = $0.0001. Healthy coins stay within 10 bps. |
 | **Risk Score** | Composite score 0–100. Higher = safer. Weighted across peg, liquidity, reserves, and adoption. |
 | **Risk Level** | Plain-English label: Low Risk (80+), Moderate (60–79), Elevated (40–59), High Risk (<40). |
+| **Regime** | Current condition in plain language: Stable, Mild stress, Peg stress, Liquidity stress, Data quality concern, or High risk. Derived from the score and peg, and tracked over time in the Risk Events tab. |
 | **Data Freshness** | How recently the risk score was calculated. |
         """)
 
@@ -1092,7 +1181,7 @@ def render_overview_tab(df: pd.DataFrame) -> None:
         "symbol", "market_cap", "supply",
         "change_7d", "change_30d",
         "top_chain", "peg_deviation_bps",
-        "overall_score", "risk_label", "scored_at",
+        "overall_score", "risk_label", "regime", "scored_at",
     ]].copy()
 
     display["market_cap"]    = display["market_cap"].apply(_fmt_supply)
@@ -1109,16 +1198,22 @@ def render_overview_tab(df: pd.DataFrame) -> None:
         "Symbol", "Market Cap", "Supply",
         "7D Change", "30D Change",
         "Top Chain", "Peg Deviation",
-        "Risk Score", "Risk Level", "Data Freshness",
+        "Risk Score", "Risk Level", "Regime", "Data Freshness",
     ]
 
     def _color_risk(val: str) -> str:
         c = RISK_COLORS.get(val, "")
         return f"color:{c}; font-weight:700;" if c else ""
 
+    def _color_regime(val: str) -> str:
+        c = REGIME_COLORS.get(val, "")
+        return f"color:{c}; font-weight:700;" if c else ""
+
     st.caption("Select a row to open that asset's full profile below.")
     event = st.dataframe(
-        display.style.map(_color_risk, subset=["Risk Level"]),
+        display.style
+            .map(_color_risk, subset=["Risk Level"])
+            .map(_color_regime, subset=["Regime"]),
         use_container_width=True,
         hide_index=True,
         on_select="rerun",
@@ -1652,8 +1747,9 @@ def render_risk_events_tab(events: list[dict]) -> None:
     _section_header(
         "Risk Events",
         "A chronological log of notable risk changes — peg breaks, liquidity "
-        "drops, supply shocks, sharp score moves, stale reserves, and provider "
-        "failures — detected automatically as the pipelines run.",
+        "drops, supply shocks, sharp score moves, stale reserves, regime "
+        "transitions, and provider failures — detected automatically as the "
+        "pipelines run.",
     )
 
     if not events:
