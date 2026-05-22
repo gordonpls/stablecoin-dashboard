@@ -195,6 +195,40 @@ class DataQualityWarning(Base):
         return {c.key: getattr(self, c.key) for c in self.__table__.columns}
 
 
+class ProviderFallbackEvent(Base):
+    """One occasion where a price was served by a fallback provider, or not at all.
+
+    Price ingestion tries the primary exchange (Binance) first and falls back to
+    Coinbase when the primary is unavailable. That fallback used to vanish into a
+    log line while ``price_snapshots.source`` was hard-coded to ``binance``, so
+    fallback usage was invisible. These rows make it auditable: one is written
+    each run only for the *exceptional* outcomes — a symbol served by a fallback
+    provider (``source_type = "fallback"``) or with no price available at all
+    (``source_type = "unavailable"``) — never for the normal primary path, so the
+    table stays compact like ``risk_events`` / ``data_quality_warnings``.
+
+    Rows de-duplicate on (symbol, data_type, source_type, recorded_at) so
+    re-recording the same run is a no-op. The healthy primary-vs-fallback *rate*
+    is derived separately from ``price_snapshots.source``; this table carries the
+    reason the primary was skipped, which a snapshot cannot.
+    """
+
+    __tablename__ = "provider_fallback_events"
+
+    id                = Column(Integer, primary_key=True, autoincrement=True)
+    symbol            = Column(String, nullable=False)
+    data_type         = Column(String, nullable=False)   # currently always "price"
+    primary_provider  = Column(String, nullable=False)   # provider tried first, e.g. "binance"
+    fallback_provider = Column(String)                   # configured fallback, e.g. "coinbase"
+    source_provider   = Column(String)                   # provider that served the data; null if unavailable
+    source_type       = Column(String, nullable=False)   # fallback | unavailable
+    fallback_reason   = Column(Text)                     # why the primary was skipped/failed
+    recorded_at       = Column(DateTime, nullable=False)
+
+    def to_dict(self) -> dict:
+        return {c.key: getattr(self, c.key) for c in self.__table__.columns}
+
+
 class ApiRequestLog(Base):
     __tablename__ = "api_request_log"
 

@@ -304,6 +304,25 @@ def data_quality(
     }
 
 
+@app.get("/provider-fallback")
+def provider_fallback(
+    window_hours: int = Query(default=24, ge=1, le=720),
+    recent_limit: int = Query(default=50, le=500),
+) -> dict:
+    """Provider fallback status for price ingestion.
+
+    Reports which provider currently serves each asset's price, the
+    primary-vs-fallback rate over ``window_hours``, whether any asset is
+    currently on the Coinbase fallback, primary-provider health
+    (healthy/degraded/failing), and a list of recent fallback events with the
+    reason the primary was skipped. Always returns a structured object, even on
+    a brand-new database.
+    """
+    from services.provider_fallback import get_fallback_status
+
+    return get_fallback_status(window_hours=window_hours, recent_limit=recent_limit)
+
+
 @app.get("/data-freshness")
 def data_freshness() -> dict:
     """System-wide freshness per data source and per provider.

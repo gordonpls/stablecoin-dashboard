@@ -67,10 +67,24 @@ async def _coinbase_price(pair: str) -> float | None:
         return None
 
 
-async def get_peg_prices(symbols: list[str] | None = None) -> dict[str, dict]:
-    """Return price + order book depth for each symbol.
+PRIMARY_PROVIDER = "binance"
+FALLBACK_PROVIDER = "coinbase"
 
-    Tries Binance first; falls back to Coinbase if unavailable.
+
+async def get_peg_prices(symbols: list[str] | None = None) -> dict[str, dict]:
+    """Return price + order book depth for each symbol, with provider provenance.
+
+    Tries Binance (primary) first; falls back to Coinbase if unavailable. Each
+    entry records *which* provider actually served the price so callers no longer
+    have to assume it was Binance:
+
+    - ``price_source``   : provider that served the price ("binance"/"coinbase"), or None
+    - ``source_type``    : "primary" | "fallback" | "unavailable"
+    - ``fallback_used``  : True when the price came from the fallback provider
+    - ``fallback_reason``: why the primary was skipped/failed (None on the happy path)
+
+    Order-book depth is Binance-only, so it is present only when the primary
+    served the price.
     """
     symbols = symbols or list(SYMBOL_MAP.keys())
     out: dict[str, dict] = {}
@@ -79,6 +93,10 @@ async def get_peg_prices(symbols: list[str] | None = None) -> dict[str, dict]:
         mapping = SYMBOL_MAP.get(sym, {})
         price: float | None = None
         depth: dict | None = None
+        price_source: str | None = None
+        source_type = "unavailable"
+        fallback_used = False
+        fallback_reason: str | None = None
 
         binance_pair = mapping.get("binance")
         coinbase_pair = mapping.get("coinbase")
@@ -86,18 +104,44 @@ async def get_peg_prices(symbols: list[str] | None = None) -> dict[str, dict]:
         if binance_pair:
             price = await _binance_price(binance_pair)
             if price is not None:
+                price_source = PRIMARY_PROVIDER
+                source_type = "primary"
                 depth = await _binance_depth(binance_pair)
+            else:
+                fallback_reason = "Binance request failed"
+        else:
+            fallback_reason = "no Binance pair configured"
 
         if price is None and coinbase_pair:
-            price = await _coinbase_price(coinbase_pair)
-            logger.info("coinbase_fallback symbol=%s", sym)
+            cb_price = await _coinbase_price(coinbase_pair)
+            if cb_price is not None:
+                price = cb_price
+                price_source = FALLBACK_PROVIDER
+                source_type = "fallback"
+                fallback_used = True
+                logger.info("coinbase_fallback symbol=%s reason=%s", sym, fallback_reason)
+            else:
+                fallback_reason = (
+                    f"{fallback_reason}; Coinbase request failed"
+                    if fallback_reason else "Coinbase request failed"
+                )
 
         if price is None:
-            logger.warning("no_price_available symbol=%s", sym)
+            if coinbase_pair is None:
+                fallback_reason = (
+                    f"{fallback_reason}; no Coinbase fallback configured"
+                    if fallback_reason else "no Coinbase fallback configured"
+                )
+            source_type = "unavailable"
+            logger.warning("no_price_available symbol=%s reason=%s", sym, fallback_reason)
 
         out[sym] = {
             "price": price,
             "peg_deviation_bps": round(abs(price - 1.0) * 10_000, 2) if price is not None else None,
+            "price_source": price_source,
+            "source_type": source_type,
+            "fallback_used": fallback_used,
+            "fallback_reason": fallback_reason,
             **(depth or {}),
         }
 

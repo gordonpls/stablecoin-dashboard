@@ -493,6 +493,13 @@ def load_data_quality(limit: int = 200) -> dict:
     }
 
 
+@st.cache_data(ttl=120, show_spinner=False)
+def load_provider_fallback(window_hours: int = 24) -> dict:
+    from services.provider_fallback import get_fallback_status
+
+    return get_fallback_status(window_hours=window_hours)
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def load_api_usage() -> pd.DataFrame:
     with get_session() as session:
@@ -1024,11 +1031,22 @@ def render_profile(symbol: str) -> None:
         peg_accent = C_RED if bps > 50 else C_AMBER if bps > 10 else C_GREEN
     risk_accent = RISK_COLORS.get(risk, C_MUTED)
 
+    # Flag when the price came from the Coinbase fallback rather than Binance.
+    price_src = (price.get("source") or "").lower()
+    if price_val is None:
+        price_note = "No price snapshot yet."
+    elif price_src == "coinbase":
+        price_note = "Latest from Coinbase (fallback)."
+    elif price_src:
+        price_note = f"Latest from {price.get('source')}."
+    else:
+        price_note = "Latest live price."
+
     c1, c2, c3, c4 = st.columns(4, gap="medium")
     c1.markdown(_stat_card(
         "Price", f"${price_val:.4f}" if price_val is not None else "—",
-        f"Latest from {price.get('source', '—')}." if price_val is not None else "No price snapshot yet.",
-        C_BLUE,
+        price_note,
+        C_RED if price_src == "coinbase" else C_BLUE,
     ), unsafe_allow_html=True)
     c2.markdown(_stat_card(
         "Peg Deviation", f"{bps:.1f} bps" if bps is not None else "—",
@@ -2143,6 +2161,141 @@ def render_data_freshness(freshness: dict) -> None:
     st.divider()
 
 
+# Primary-provider health → colour / label (mirrors get_fallback_status).
+FALLBACK_STATUS_COLORS = {
+    "healthy":  C_GREEN,
+    "degraded": C_AMBER,
+    "failing":  C_RED,
+    "unknown":  C_MUTED,
+}
+FALLBACK_STATUS_LABELS = {
+    "healthy":  "Healthy",
+    "degraded": "Degraded",
+    "failing":  "Failing",
+    "unknown":  "No data",
+}
+
+
+def render_provider_fallback(fallback: dict) -> None:
+    _section_header(
+        "Provider Fallback",
+        "Prices come from Binance first and fall back to Coinbase when Binance is "
+        "unavailable. This shows which provider is actually serving each asset, "
+        "how often the fallback was used, and whether the primary provider is "
+        "failing — so degraded or alternate data is never silent.",
+    )
+
+    summary = fallback.get("summary", {})
+    primary = fallback.get("primary_provider", "binance")
+    fallback_prov = fallback.get("fallback_provider", "coinbase")
+    window_h = fallback.get("window_hours", 24)
+    status = summary.get("primary_status", "unknown")
+
+    if summary.get("total_price_points", 0) == 0 and not fallback.get("recent_events"):
+        _callout(
+            "No price points recorded yet. Run the price pipeline first; fallback "
+            "usage will appear here once Binance and Coinbase have been queried.",
+            "info",
+        )
+        st.divider()
+        return
+
+    # Headline callout when the primary is degraded/failing or fallback is live.
+    if status == "failing":
+        _callout(
+            f"<strong>{primary.capitalize()} (primary) appears to be failing.</strong> "
+            f"{summary.get('primary_status_reason', '')}",
+            "danger",
+        )
+    elif status == "degraded" or summary.get("currently_on_fallback"):
+        on_fb = summary.get("assets_on_fallback") or []
+        extra = (
+            f" Currently serving {', '.join(on_fb)} from {fallback_prov} (fallback)."
+            if on_fb else ""
+        )
+        _callout(
+            f"<strong>Fallback data in use.</strong> "
+            f"{summary.get('primary_status_reason', '')}{extra}",
+            "warning",
+        )
+
+    # KPI strip.
+    status_color = FALLBACK_STATUS_COLORS.get(status, C_MUTED)
+    status_label = FALLBACK_STATUS_LABELS.get(status, status)
+    rate = summary.get("fallback_rate")
+    rate_txt = f"{rate:.1f}%" if rate is not None else "—"
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        st.markdown(
+            f"<div style='font-size:12px;color:{C_MUTED};'>Primary ({primary})</div>"
+            f"<div style='font-size:22px;font-weight:800;color:{status_color};'>{status_label}</div>",
+            unsafe_allow_html=True,
+        )
+    with k2:
+        st.markdown(
+            f"<div style='font-size:12px;color:{C_MUTED};'>Fallback rate ({window_h}h)</div>"
+            f"<div style='font-size:22px;font-weight:800;'>{rate_txt}</div>",
+            unsafe_allow_html=True,
+        )
+    with k3:
+        st.markdown(
+            f"<div style='font-size:12px;color:{C_MUTED};'>Fallback events ({window_h}h)</div>"
+            f"<div style='font-size:22px;font-weight:800;'>{summary.get('fallback_events', 0)}</div>",
+            unsafe_allow_html=True,
+        )
+    with k4:
+        st.markdown(
+            f"<div style='font-size:12px;color:{C_MUTED};'>Unavailable ({window_h}h)</div>"
+            f"<div style='font-size:22px;font-weight:800;'>{summary.get('unavailable_events', 0)}</div>",
+            unsafe_allow_html=True,
+        )
+
+    # Per-asset source table.
+    assets = fallback.get("assets", [])
+    if assets:
+        st.markdown("<div style='margin-top:16px;'></div>", unsafe_allow_html=True)
+        st.markdown("##### Current price source by asset")
+        asset_table = pd.DataFrame([
+            {
+                "Asset":         a["asset"],
+                "Current Source": (a.get("latest_source") or "—").capitalize(),
+                "On Fallback":   "Yes" if a.get("on_fallback") else "No",
+                "Primary Pts":   a.get("primary_points", 0),
+                "Fallback Pts":  a.get("fallback_points", 0),
+                "Last Fallback": _age_from_iso(a.get("last_fallback_at")),
+            }
+            for a in assets
+        ])
+
+        def _color_fb(val: str) -> str:
+            return f"color:{C_RED}; font-weight:700;" if val == "Yes" else f"color:{C_GREEN};"
+
+        st.dataframe(
+            asset_table.style.map(_color_fb, subset=["On Fallback"]),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    # Recent fallback events.
+    events = fallback.get("recent_events", [])
+    if events:
+        st.markdown("<div style='margin-top:14px;'></div>", unsafe_allow_html=True)
+        with st.expander(f"Recent fallback events ({len(events)})", expanded=False):
+            ev_table = pd.DataFrame([
+                {
+                    "When":     _fmt_event_time(e.get("recorded_at")),
+                    "Asset":    e.get("symbol"),
+                    "Outcome":  "Fallback" if e.get("source_type") == "fallback" else "Unavailable",
+                    "Served By": (e.get("source_provider") or "—").capitalize(),
+                    "Reason":   e.get("fallback_reason") or "",
+                }
+                for e in events
+            ])
+            st.dataframe(ev_table, use_container_width=True, hide_index=True)
+
+    st.divider()
+
+
 def _fmt_event_time(ts) -> str:
     """Format a risk-event timestamp; accepts a datetime or an ISO string."""
     if ts is None:
@@ -2438,6 +2591,8 @@ def render_data_quality(data: dict) -> None:
 
 def render_api_tab() -> None:
     render_data_freshness(load_data_freshness())
+
+    render_provider_fallback(load_provider_fallback())
 
     render_pipeline_runs(load_pipeline_runs())
 

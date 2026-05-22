@@ -110,6 +110,24 @@ CREATE INDEX IF NOT EXISTS idx_dq_warnings_active
 CREATE INDEX IF NOT EXISTS idx_dq_warnings_symbol
     ON data_quality_warnings(symbol, warning_type);
 
+CREATE TABLE IF NOT EXISTS provider_fallback_events (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol            TEXT NOT NULL,
+    data_type         TEXT NOT NULL,         -- currently always "price"
+    primary_provider  TEXT NOT NULL,         -- provider tried first, e.g. binance
+    fallback_provider TEXT,                  -- configured fallback, e.g. coinbase
+    source_provider   TEXT,                  -- provider that actually served the data; NULL if unavailable
+    source_type       TEXT NOT NULL,         -- fallback | unavailable
+    fallback_reason   TEXT,                  -- why the primary was skipped/failed
+    recorded_at       TIMESTAMP NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_fallback_events_time
+    ON provider_fallback_events(recorded_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_fallback_events_symbol_time
+    ON provider_fallback_events(symbol, recorded_at DESC);
+
 CREATE TABLE IF NOT EXISTS api_request_log (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     provider     TEXT NOT NULL,

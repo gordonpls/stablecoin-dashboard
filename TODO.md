@@ -872,7 +872,41 @@ CREATE TABLE data_quality_warnings (
 
 ---
 
-## 14. Add Provider Fallback Status
+## 14. Add Provider Fallback Status  (DONE 2026-05-22)
+
+Implemented in `services/provider_fallback.py`, fixing a real bug along the way:
+`pipelines/update_prices.py` hard-coded `source="binance"` on every price
+snapshot even when ingestion had actually fallen back to Coinbase, so fallback
+usage was invisible. `ingestion/exchanges.get_peg_prices` now returns per-symbol
+provenance (`price_source`, `source_type` primary/fallback/unavailable,
+`fallback_used`, `fallback_reason`); the price pipeline stores the real
+`price_source` and calls `record_fallback_events()` (best-effort, idempotent on
+`(symbol, data_type, source_type, recorded_at)`) which logs a row to the new
+`provider_fallback_events` table only for the *exceptional* outcomes (a fallback
+served the price, or no price was available — never the normal primary path,
+keeping the table compact like `risk_events`). `get_fallback_status(window_hours)`
+derives the healthy primary-vs-fallback *rate* and each asset's current source
+from `price_snapshots.source` (excluding the liquidity pipeline's
+`exchanges_depth` rows), pulls the *reason* from the event table, and grades the
+primary provider `healthy`/`degraded`/`failing`/`unknown` (failing on ≥50%
+fallback rate in-window or any unavailable price). Exposed via
+`GET /provider-fallback?window_hours=&recent_limit=` and surfaced as a "Provider
+Fallback" panel in the API Usage tab (primary-health KPI strip, degraded/failing
+callout, per-asset current-source table with an On-Fallback badge, recent-events
+expander) plus a Coinbase-fallback flag on the Asset Profile price card. Tests in
+`tests/test_provider_fallback.py`.
+
+Remaining / follow-ups:
+- The liquidity pipeline (`update_liquidity`) queries Binance depth only and
+  still writes a generic `source="exchanges_depth"`; depth has no fallback
+  provider, so a Binance depth outage is silently absent rather than recorded as
+  an availability event. Consider logging a `data_type="depth"` unavailable
+  event there too.
+- The "primary repeatedly fails" signal here overlaps the `API_FAILURE`
+  risk event (#4) and the `failing` provider pill in `services/freshness.py`;
+  consider having one of them cite the others so the three don't drift.
+- Surface the per-asset On-Fallback badge in the Overview table (currently only
+  the Asset Profile + API Usage tab show it).
 
 ### Objective
 
@@ -1076,7 +1110,7 @@ These are the highest-value next tasks for an AI coding agent:
 3. ~~Add metric-level freshness and confidence indicators.~~ (DONE 2026-05-21 — `/data-freshness` + Data Freshness panel)
 4. ~~Add `pipeline_runs` table and job run history UI.~~ (DONE 2026-05-21 — `/pipeline-runs` + Pipeline Runs panel)
 5. ~~Add data validation warnings.~~ (DONE 2026-05-21 — `/data-quality` + Data Quality panel)
-6. Add provider fallback status visibility.
+6. ~~Add provider fallback status visibility.~~ (DONE 2026-05-22 — `services/provider_fallback.py`, `provider_fallback_events` table, `/provider-fallback`, API-Usage "Provider Fallback" panel; also fixed the hard-coded `source="binance"` bug in `update_prices`)
 7. ~~Add explainable score drilldowns.~~ (DONE 2026-05-21 — `/stablecoins/{symbol}/score-explanation` + Risk Scores / Profile drilldown)
 8. ~~Add risk events timeline.~~ (DONE 2026-05-21)
 9. ~~Add chain concentration risk.~~ (DONE 2026-05-21 — `services/chain_concentration.py`, `/stablecoins/{symbol}/chain-supply` + `/stablecoins/chain-concentration`, Supply-tab heatmap + table)
