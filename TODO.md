@@ -77,6 +77,43 @@ Existing FastAPI endpoints:
 
 # Implementation Priorities
 
+## Priority 0: Stability First — Fix Errors Before Features  (STANDING — RUN EVERY ITERATION)
+
+**This section always outranks everything below it.** Before implementing ANY
+feature, confirm the app is healthy. If it is not, fixing it IS this iteration's
+task. Do not start feature work on a broken app.
+
+### Health check (do this first, every iteration)
+
+1. Run the test suite: `python -m pytest tests/ -x -q`.
+   If anything fails, stop and fix it. Never begin a feature with a red suite.
+2. Confirm the app imports without raising:
+   - `python -c "import app.dashboard.main"`
+   - `python -c "import app.api.server"`
+3. Scan for obvious runtime errors and rough edges:
+   - Unhandled exceptions or tracebacks in logs
+   - Broken/missing imports
+   - Crashes on empty or missing data (`None` / `NaN` / `NaT`, empty DataFrames)
+   - API endpoints returning 500s
+   - Pipelines that fail silently or write malformed data
+   - Mislabeled or misleading UI values (e.g. a metric that is always 0)
+4. Clear the running bug list in the **Discovered Issues** section at the bottom
+   of this file. Those are known, already-triaged defects — fix them (highest
+   severity first) before any new feature. When one is fixed, remove it from
+   Discovered Issues and note it in `CHANGELOG.md`.
+5. Only once the suite is green, the app imports, and Discovered Issues is empty,
+   drop down to the highest-priority unfinished feature.
+
+### Rules
+
+- A fix ALWAYS outranks a feature. Found a bug? Fixing it is the whole iteration.
+- Reproduce the error first, then fix it, then add a regression test.
+- If a fix and a feature are entangled, ship the fix as its own iteration.
+- Any new bug you notice goes into **Discovered Issues**, not silently ignored.
+- Record every fix in `CHANGELOG.md`: what broke, why, and how it was fixed.
+
+---
+
 ## Priority 1: Highest User Value
 
 These features should be implemented first because they make the dashboard more actionable and useful for day-to-day monitoring.
