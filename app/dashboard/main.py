@@ -5,6 +5,7 @@ Reads directly from SQLite. Run ingestion pipelines first to populate data.
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 import logging
@@ -28,6 +29,7 @@ from db.models import (
     ApiRequestLog,
     PriceSnapshot,
     RiskScore,
+    Stablecoin,
     SupplySnapshot,
     get_session,
     init_db,
@@ -38,6 +40,11 @@ logger = logging.getLogger(__name__)
 # Per CLAUDE.md: "1 to 5 minute refresh for peg prices", "daily refresh for slow data".
 PRICE_REFRESH_SECS  = 600   # price/score pipeline cadence (10 minutes)
 SUPPLY_REFRESH_SECS = 3600  # supply + reserves cadence (1 hour)
+
+# Password gating any control that changes app behaviour (manual refresh,
+# watchlist edits). Overridable in production via the DASHBOARD_PASSWORD env var;
+# defaults to the historical value so existing deployments keep working.
+DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "2026")
 
 # Process-level timestamps so the timer survives multiple browser sessions
 # without hammering the APIs on every new connection.
@@ -505,6 +512,28 @@ def load_readiness() -> dict:
     from services.readiness import get_readiness
 
     return get_readiness()
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_watchlist() -> list[dict]:
+    from services.watchlist import get_watchlist
+
+    return get_watchlist()
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_watchlist_symbols() -> list[str]:
+    from services.watchlist import watchlist_symbols
+
+    return sorted(watchlist_symbols())
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_all_symbols() -> list[str]:
+    """All tracked stablecoin tickers — the candidate set for the watchlist editor."""
+    with get_session() as session:
+        rows = session.execute(select(Stablecoin.symbol)).scalars().all()
+    return sorted(rows)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -1257,6 +1286,41 @@ def render_profile_tab(df: pd.DataFrame) -> None:
     render_profile(symbol)
 
 
+def _render_watchlist_panel() -> None:
+    """Compact panel of pinned assets at the top of the Overview tab.
+
+    Shows an empty-state hint when nothing is watched so the feature is
+    discoverable; editing happens in the password-gated sidebar editor.
+    """
+    wl = load_watchlist()
+    st.markdown("#### ⭐ Your Watchlist")
+    if not wl:
+        _callout(
+            "No assets pinned yet. Add some from the <b>Watchlist</b> editor in the "
+            "sidebar (password required) to keep your key coins in view.",
+            "info",
+        )
+        return
+
+    wl_df = pd.DataFrame(wl)
+    panel = pd.DataFrame({
+        "Symbol":        wl_df["symbol"],
+        "Name":          wl_df["name"].fillna("—"),
+        "Price":         wl_df["price"].apply(lambda v: f"${v:.4f}" if pd.notna(v) else "—"),
+        "Peg Deviation": wl_df["peg_deviation_bps"].apply(
+            lambda v: f"{v:.1f} bps" if pd.notna(v) else "—"
+        ),
+        "Supply":        wl_df["circulating_supply"].apply(_fmt_supply),
+        "Risk Score":    wl_df["overall_score"].apply(
+            lambda v: f"{v:.0f} / 100" if pd.notna(v) else "—"
+        ),
+        "Note":          wl_df["note"].fillna(""),
+    })
+    st.dataframe(panel, use_container_width=True, hide_index=True)
+    st.caption("Edit your watchlist from the sidebar (password required).")
+    st.divider()
+
+
 def render_overview_tab(df: pd.DataFrame) -> None:
     _section_header(
         "Market Overview",
@@ -1283,20 +1347,31 @@ def render_overview_tab(df: pd.DataFrame) -> None:
         _callout("No data yet. Run the ingestion pipelines first.", "info")
         return
 
+    watched = set(load_watchlist_symbols())
+    _render_watchlist_panel()
+
     # Filters row
-    fc1, fc2 = st.columns([2, 1])
+    fc1, fc2, fc3 = st.columns([2, 1, 1])
     risk_filter = fc1.selectbox(
         "Filter by risk level",
         ["All", "Low Risk", "Moderate", "Elevated", "High Risk"],
         key="overview_risk_filter",
     )
     search = fc2.text_input("Search symbol", placeholder="e.g. USDT", key="overview_search")
+    watch_only = fc3.checkbox(
+        "⭐ Watchlist only",
+        key="overview_watch_only",
+        disabled=not watched,
+        help="Show only assets you have pinned in the sidebar watchlist.",
+    )
 
     filtered = df.copy()
     if risk_filter != "All":
         filtered = filtered[filtered["risk_label"] == risk_filter]
     if search:
         filtered = filtered[filtered["symbol"].str.upper().str.contains(search.upper())]
+    if watch_only and watched:
+        filtered = filtered[filtered["symbol"].isin(watched)]
 
     st.caption(f"Showing {len(filtered)} of {len(df)} assets")
 
@@ -1323,6 +1398,9 @@ def render_overview_tab(df: pd.DataFrame) -> None:
         "Top Chain", "Peg Deviation",
         "Risk Score", "Risk Level", "Regime", "Data Freshness",
     ]
+
+    # Leading star marks watched assets (read-only indicator; editing is gated).
+    display.insert(0, "★", ["⭐" if sym in watched else "" for sym in filtered["symbol"]])
 
     def _color_risk(val: str) -> str:
         c = RISK_COLORS.get(val, "")
@@ -2838,7 +2916,7 @@ def main() -> None:
     st.sidebar.subheader("Manual Refresh")
     pwd = st.sidebar.text_input("Password", type="password", key="refresh_pwd")
     if st.sidebar.button("Refresh Data", use_container_width=True):
-        if pwd == "2026":
+        if pwd == DASHBOARD_PASSWORD:
             import core.cache as _api_cache
             import pipelines.update_supply   as _supply
             import pipelines.update_prices   as _prices
@@ -2865,6 +2943,36 @@ def main() -> None:
             if all_ok:
                 st.cache_data.clear()
                 st.rerun()
+        else:
+            st.sidebar.error("Incorrect password")
+
+    # ── watchlist editor (password-gated) ───────────────────────────────────────
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Watchlist")
+    st.sidebar.caption(
+        "Pin assets for quick monitoring. Pinned coins appear in a ⭐ panel and a "
+        "filter on the Overview tab. Editing is password-protected."
+    )
+    wl_options = load_all_symbols()
+    wl_current = load_watchlist_symbols()
+    wl_pick = st.sidebar.multiselect(
+        "Watched assets",
+        options=wl_options,
+        default=[s for s in wl_current if s in wl_options],
+        key="watchlist_select",
+    )
+    wl_pwd = st.sidebar.text_input("Password", type="password", key="watchlist_pwd")
+    if st.sidebar.button("Save watchlist", use_container_width=True):
+        if wl_pwd == DASHBOARD_PASSWORD:
+            from services.watchlist import set_watchlist
+
+            res = set_watchlist(wl_pick)
+            st.cache_data.clear()
+            msg = f"Watchlist saved (+{len(res['added'])} / -{len(res['removed'])})."
+            if res["skipped"]:
+                msg += f" Skipped unknown: {', '.join(res['skipped'])}."
+            st.sidebar.success(msg)
+            st.rerun()
         else:
             st.sidebar.error("Incorrect password")
 

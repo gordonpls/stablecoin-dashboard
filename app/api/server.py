@@ -1,10 +1,16 @@
 """FastAPI server — internal API consumed by the Streamlit dashboard."""
 
 from fastapi import FastAPI, HTTPException, Query, Response
+from pydantic import BaseModel
 from sqlalchemy import select
 from db.models import get_session, Stablecoin, RiskScore, PriceSnapshot
 
 app = FastAPI(title="Stablecoin Dashboard API", version="0.1.0")
+
+
+class WatchlistAddRequest(BaseModel):
+    symbol: str
+    note: str | None = None
 
 
 @app.get("/health")
@@ -157,6 +163,48 @@ def list_regimes() -> list[dict]:
     from services.regimes import current_regimes
 
     return current_regimes()
+
+
+@app.get("/watchlist")
+def get_watchlist_endpoint() -> list[dict]:
+    """The operator's pinned watchlist, newest first, enriched with latest metrics.
+
+    Each entry carries the asset name plus its latest price, peg deviation,
+    circulating supply, and overall risk score (null where no data exists).
+    Returns an empty list when nothing is watched.
+    """
+    from services.watchlist import get_watchlist
+
+    return get_watchlist()
+
+
+@app.post("/watchlist")
+def add_watchlist_endpoint(req: WatchlistAddRequest) -> dict:
+    """Pin a stablecoin to the watchlist (idempotent).
+
+    Returns the stored item. 404 when ``symbol`` is not a tracked stablecoin;
+    re-adding an existing symbol updates its note rather than duplicating it.
+    """
+    from services.watchlist import add_to_watchlist
+
+    item = add_to_watchlist(req.symbol, note=req.note)
+    if item is None:
+        raise HTTPException(
+            status_code=404, detail=f"{req.symbol} is not a tracked stablecoin"
+        )
+    return item
+
+
+@app.delete("/watchlist/{symbol}")
+def remove_watchlist_endpoint(symbol: str) -> dict:
+    """Remove a stablecoin from the watchlist. 404 when it was not watched."""
+    from services.watchlist import remove_from_watchlist
+
+    if not remove_from_watchlist(symbol):
+        raise HTTPException(
+            status_code=404, detail=f"{symbol} is not in the watchlist"
+        )
+    return {"symbol": symbol.strip().upper(), "removed": True}
 
 
 @app.get("/stablecoins/{symbol}")

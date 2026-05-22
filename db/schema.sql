@@ -157,3 +157,10 @@ CREATE INDEX IF NOT EXISTS idx_pipeline_runs_name_time
 
 CREATE INDEX IF NOT EXISTS idx_pipeline_runs_time
     ON pipeline_runs(started_at DESC);
+
+CREATE TABLE IF NOT EXISTS watchlist (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol    TEXT NOT NULL UNIQUE REFERENCES stablecoins(symbol),  -- one row per asset
+    note      TEXT,                                                 -- optional operator note
+    added_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

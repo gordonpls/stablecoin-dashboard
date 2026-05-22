@@ -267,6 +267,29 @@ class PipelineRun(Base):
         return {c.key: getattr(self, c.key) for c in self.__table__.columns}
 
 
+class WatchlistItem(Base):
+    """A stablecoin the operator has pinned to their watchlist.
+
+    A focus list for day-to-day monitoring: the dashboard surfaces watched
+    assets in a dedicated panel and offers a watchlist-only view of the overview
+    table. There is no per-user auth, so the watchlist is a single global list
+    for the deployment, and edits are gated behind the dashboard password
+    (anonymous controls that change app behaviour are not allowed). ``symbol`` is
+    unique — adding an already-watched symbol updates its note instead of
+    inserting a duplicate row.
+    """
+
+    __tablename__ = "watchlist"
+
+    id       = Column(Integer, primary_key=True, autoincrement=True)
+    symbol   = Column(String, nullable=False, unique=True)
+    note     = Column(Text)
+    added_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    def to_dict(self) -> dict:
+        return {c.key: getattr(self, c.key) for c in self.__table__.columns}
+
+
 @contextmanager
 def get_session() -> Generator[Session, None, None]:
     with Session(engine) as session:

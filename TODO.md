@@ -682,23 +682,47 @@ GET /alerts                          TODO (stateful write feature — see note)
 POST /alerts                         TODO
 PATCH /alerts/{id}                   TODO
 DELETE /alerts/{id}                  TODO
-GET /watchlist                       TODO
-POST /watchlist                      TODO
+GET /watchlist                       DONE 2026-05-22 (services/watchlist.py)
+POST /watchlist                      DONE 2026-05-22
+DELETE /watchlist/{symbol}           DONE 2026-05-22
 GET /risk-events                     DONE (#4)
 GET /data-freshness                  DONE (#3)
 ```
 
-All the read-only endpoints in this list now exist. The remaining work is the
-**alerts** CRUD set and the **watchlist** endpoints. These are stateful *write*
-features: each needs a new table (e.g. `alerts`, `watchlist`), a service layer,
-and — crucially — a **password-protected** UI, because anonymous write controls
-that change app behaviour are not allowed (see memory:
-`feedback_dashboard_controls`). Alerts also need an *evaluation* step (check each
-active rule against the latest snapshot and surface triggered alerts), which
-overlaps `services/risk_events.py` — design alerts as user-defined thresholds
-that reuse the same comparison primitives rather than a parallel detector. Treat
-alerts and watchlist as two separate iterations, each implemented end-to-end
-(model + service + endpoints + gated UI + tests) so neither lands half-finished.
+The **watchlist** iteration is now done (see below). The only remaining write
+feature is the **alerts** CRUD set. Alerts are a stateful *write* feature: a new
+table (`alerts`), a service layer, and — crucially — a **password-protected** UI,
+because anonymous write controls that change app behaviour are not allowed (see
+memory: `feedback_dashboard_controls`; reuse the `DASHBOARD_PASSWORD` gate the
+watchlist editor and manual refresh already share). Alerts also need an
+*evaluation* step (check each active rule against the latest snapshot and surface
+triggered alerts), which overlaps `services/risk_events.py` — design alerts as
+user-defined thresholds that reuse the same comparison primitives rather than a
+parallel detector. Implement alerts end-to-end (model + service + endpoints +
+gated UI + tests) in a single iteration so it does not land half-finished.
+
+### Watchlist (DONE 2026-05-22)
+
+`watchlist` table (`WatchlistItem` model + `db/schema.sql`, one row per symbol,
+unique) + `services/watchlist.py`. `add_to_watchlist`/`remove_from_watchlist`
+normalise the symbol and only accept assets present in `stablecoins` (unknown
+symbols are rejected, never invented); `add` is idempotent and updates the note.
+`set_watchlist` syncs the list to a desired set (used by the dashboard
+multiselect, skips unknowns). `get_watchlist` returns watched assets newest-first
+enriched with latest price / peg deviation / supply / overall score (null where
+absent). Exposed via `GET /watchlist`, `POST /watchlist` (404 on unknown symbol),
+`DELETE /watchlist/{symbol}` (404 when not watched). Surfaced as a ⭐ Watchlist
+panel atop the Overview tab, a ⭐ marker column + "Watchlist only" filter on the
+overview table, and a **password-gated** multiselect editor in the sidebar.
+Tests in `tests/test_watchlist.py`.
+
+Follow-ups:
+- The watchlist is a single global list (no per-user auth); revisit if/when an
+  auth/user model is added so each user gets their own.
+- The ⭐ marker / watchlist filter could be mirrored on the Asset Profile and in
+  other comparison tables (Risk Scores, Supply) for consistency.
+- A `note` is only editable via the API today; the sidebar editor manages
+  membership only. Add note editing to the gated UI if useful.
 
 ### Supply endpoint shape (DONE)
 
