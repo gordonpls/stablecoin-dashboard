@@ -139,3 +139,25 @@ def test_init_db_is_idempotent(in_memory_db):
     """Calling init_db twice must not raise."""
     init_db()
     init_db()
+
+
+# ── engine hardening (guards against transient SQLite corruption) ────────────────
+
+def test_make_engine_sets_busy_timeout(tmp_path):
+    """File-based SQLite engines must wait on locks rather than erroring."""
+    from db.models import _make_engine
+
+    eng = _make_engine(f"sqlite:///{tmp_path / 'probe.db'}")
+    with eng.connect() as conn:
+        timeout = conn.exec_driver_sql("PRAGMA busy_timeout").scalar()
+    assert timeout >= 30000
+
+
+def test_make_engine_uses_nullpool_for_file_db(tmp_path):
+    """A file DB must not pool connections — a stale pooled connection sees a
+    'malformed' image when the file is swapped/rewritten underneath it."""
+    from sqlalchemy.pool import NullPool
+    from db.models import _make_engine
+
+    eng = _make_engine(f"sqlite:///{tmp_path / 'probe.db'}")
+    assert isinstance(eng.pool, NullPool)

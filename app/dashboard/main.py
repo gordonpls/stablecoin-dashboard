@@ -23,6 +23,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 
 from db.models import (
     ApiRequestLog,
@@ -2322,6 +2323,25 @@ def render_api_tab() -> None:
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
+def _safe(fn, *args, default=None, where: str = "This section"):
+    """Run a loader/render callable, degrading gracefully on a transient DB error.
+
+    SQLite can briefly report "database is locked" or "database disk image is
+    malformed" while a pipeline writes the file or git swaps it on disk. Rather
+    than crash the whole dashboard, show a recoverable notice for just that
+    section; the next auto-refresh rerun reads the file cleanly.
+    """
+    try:
+        return fn(*args)
+    except SQLAlchemyError as exc:
+        logger.warning("db_error where=%s error=%s", where, exc)
+        st.warning(
+            f"{where} is temporarily unavailable — the database was briefly locked "
+            "or being updated. It refreshes automatically; no action needed."
+        )
+        return default
+
+
 def main() -> None:
     init_db()
     _inject_styles()
@@ -2331,11 +2351,11 @@ def main() -> None:
     if _run_scheduled_pipelines():
         st.cache_data.clear()
 
-    overview_df = load_overview()
-    scores_df   = load_latest_scores()
+    overview_df = _safe(load_overview, default=pd.DataFrame(), where="Market data")
+    scores_df   = _safe(load_latest_scores, default=pd.DataFrame(), where="Score data")
 
     render_header(overview_df)
-    render_market_changes(load_market_changes())
+    _safe(lambda: render_market_changes(load_market_changes()), where="Market Changes")
 
     tab_overview, tab_profile, tab_supply, tab_peg, tab_risk, tab_events, tab_api = st.tabs([
         "Overview",
@@ -2348,19 +2368,19 @@ def main() -> None:
     ])
 
     with tab_overview:
-        render_overview_tab(overview_df)
+        _safe(render_overview_tab, overview_df, where="Overview")
     with tab_profile:
-        render_profile_tab(overview_df)
+        _safe(render_profile_tab, overview_df, where="Asset Profile")
     with tab_supply:
-        render_supply_tab(scores_df)
+        _safe(render_supply_tab, scores_df, where="Supply")
     with tab_peg:
-        render_peg_tab(scores_df)
+        _safe(render_peg_tab, scores_df, where="Peg Deviation")
     with tab_risk:
-        render_risk_tab(scores_df)
+        _safe(render_risk_tab, scores_df, where="Risk Scores")
     with tab_events:
-        render_risk_events_tab(load_risk_events())
+        _safe(lambda: render_risk_events_tab(load_risk_events()), where="Risk Events")
     with tab_api:
-        render_api_tab()
+        _safe(render_api_tab, where="API Usage")
 
     st.sidebar.markdown("---")
     st.sidebar.caption(f"Data as of {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC")

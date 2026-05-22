@@ -5,8 +5,9 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Generator
 
-from sqlalchemy import create_engine, Column, String, Float, Integer, Text, DateTime, Date
+from sqlalchemy import create_engine, event, Column, String, Float, Integer, Text, DateTime, Date
 from sqlalchemy.orm import DeclarativeBase, Session
+from sqlalchemy.pool import NullPool
 
 def _default_db_url() -> str:
     # On Streamlit Cloud the repo root is a read-only mount; fall back to /tmp.
@@ -23,13 +24,38 @@ def _default_db_url() -> str:
     return f"sqlite:///{os.path.join(tempfile.gettempdir(), 'stablecoin.db')}"
 
 
+def _make_engine(url: str):
+    """Build the engine, hardened for a file-based SQLite that is read while a
+    pipeline writes it and that git may swap on disk while the app is running.
+
+    - NullPool: never keep a connection open between sessions. A pooled connection
+      holds a stale page cache if ``stablecoin.db`` is replaced underneath it (e.g.
+      a git checkout/commit of the tracked DB, or a large rewrite by a pipeline),
+      which SQLite then reports as "database disk image is malformed". Opening a
+      fresh connection per session always sees the current file.
+    - busy_timeout: wait for a writer's lock instead of failing with
+      "database is locked".
+    """
+    kwargs: dict = {"echo": False, "future": True}
+    if url.startswith("sqlite"):
+        kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}
+        if ":memory:" not in url:
+            kwargs["poolclass"] = NullPool
+    eng = create_engine(url, **kwargs)
+
+    if url.startswith("sqlite"):
+        @event.listens_for(eng, "connect")
+        def _set_sqlite_pragmas(dbapi_conn, _record):
+            cur = dbapi_conn.cursor()
+            cur.execute("PRAGMA busy_timeout=30000")   # ms; wait on locks
+            cur.execute("PRAGMA synchronous=NORMAL")
+            cur.close()
+
+    return eng
+
+
 DATABASE_URL = os.getenv("DATABASE_URL", _default_db_url())
-engine = create_engine(
-    DATABASE_URL,
-    echo=False,
-    future=True,
-    connect_args={"check_same_thread": False},
-)
+engine = _make_engine(DATABASE_URL)
 
 
 class Base(DeclarativeBase):
