@@ -156,6 +156,30 @@ def get_prices(symbol: str, limit: int = Query(default=288, le=1440)) -> list[di
         return [r.to_dict() for r in rows]
 
 
+@app.get("/stablecoins/{symbol}/supply")
+def get_supply(
+    symbol: str,
+    history_days: int = Query(default=90, ge=1, le=365),
+    history_limit: int | None = Query(default=None, ge=1, le=2000),
+) -> dict:
+    """Circulating-supply detail and history for one asset.
+
+    Returns the latest supply + chain breakdown, 7d/30d supply change (null when
+    there is not enough history to compare), and a deduplicated supply time
+    series over ``history_days`` (optionally capped to the newest
+    ``history_limit`` points). 404 only when the symbol is completely unknown; a
+    known asset with no supply data returns null sections rather than erroring.
+    """
+    from services.supply import get_supply_detail
+
+    detail = get_supply_detail(
+        symbol, history_days=history_days, history_limit=history_limit
+    )
+    if detail is None:
+        raise HTTPException(status_code=404, detail=f"{symbol} not found")
+    return detail
+
+
 @app.get("/stablecoins/{symbol}/liquidity")
 def get_liquidity(symbol: str) -> dict:
     """Order-book liquidity trend for one asset: 24h/7d depth change + history.

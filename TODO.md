@@ -663,7 +663,7 @@ Users can see market structure changes and competitive momentum.
 
 ---
 
-## 10. Add More Backend Endpoints
+## 10. Add More Backend Endpoints  (PARTIALLY DONE)
 
 ### Objective
 
@@ -672,21 +672,46 @@ Add API routes that support the new user-facing features.
 ### Required Endpoints
 
 ```text
-GET /stablecoins/{symbol}/supply
-GET /stablecoins/{symbol}/liquidity
-GET /stablecoins/{symbol}/chain-supply
-GET /stablecoins/{symbol}/events
-GET /stablecoins/changes
-GET /stablecoins/rankings
-GET /alerts
-POST /alerts
-PATCH /alerts/{id}
-DELETE /alerts/{id}
-GET /watchlist
-POST /watchlist
-GET /risk-events
-GET /data-freshness
+GET /stablecoins/{symbol}/supply     DONE 2026-05-22 (services/supply.py)
+GET /stablecoins/{symbol}/liquidity  DONE (#7)
+GET /stablecoins/{symbol}/chain-supply DONE (#8)
+GET /stablecoins/{symbol}/events     DONE (#4)
+GET /stablecoins/changes             DONE (#1)
+GET /stablecoins/rankings            DONE (#9)
+GET /alerts                          TODO (stateful write feature — see note)
+POST /alerts                         TODO
+PATCH /alerts/{id}                   TODO
+DELETE /alerts/{id}                  TODO
+GET /watchlist                       TODO
+POST /watchlist                      TODO
+GET /risk-events                     DONE (#4)
+GET /data-freshness                  DONE (#3)
 ```
+
+All the read-only endpoints in this list now exist. The remaining work is the
+**alerts** CRUD set and the **watchlist** endpoints. These are stateful *write*
+features: each needs a new table (e.g. `alerts`, `watchlist`), a service layer,
+and — crucially — a **password-protected** UI, because anonymous write controls
+that change app behaviour are not allowed (see memory:
+`feedback_dashboard_controls`). Alerts also need an *evaluation* step (check each
+active rule against the latest snapshot and surface triggered alerts), which
+overlaps `services/risk_events.py` — design alerts as user-defined thresholds
+that reuse the same comparison primitives rather than a parallel detector. Treat
+alerts and watchlist as two separate iterations, each implemented end-to-end
+(model + service + endpoints + gated UI + tests) so neither lands half-finished.
+
+### Supply endpoint shape (DONE)
+
+`GET /stablecoins/{symbol}/supply?history_days=&history_limit=` →
+`services.supply.get_supply_detail`: latest supply + chain breakdown, 7d/30d
+supply change (null on insufficient history), and a deduped supply time series.
+404 only for a completely unknown symbol; a known asset with no supply data
+returns null sections. Reuses the canonical `services.profile._parse_chains`
+parser and the same ticker-collision / insufficient-history guards as
+`services/dominance.py`. Tests in `tests/test_supply.py`. Not yet surfaced in the
+dashboard (the Supply tab and Asset Profile already chart supply via other
+services); wire `/supply` in if a single source for per-asset supply history is
+wanted.
 
 ### Acceptance Criteria
 
