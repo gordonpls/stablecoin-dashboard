@@ -83,6 +83,31 @@ def chain_concentration(limit: int = Query(default=50, le=200)) -> list[dict]:
     return chain_concentration_ranking(limit=limit)
 
 
+@app.get("/stablecoins/rankings")
+def stablecoin_rankings(
+    window: str = Query(default="7d"),
+    limit: int = Query(default=50, le=200),
+    movers_limit: int = Query(default=10, le=100),
+) -> dict:
+    """Market dominance, share, and competitive momentum across all assets.
+
+    Returns total tracked supply, asset count, the dominant asset and its share,
+    a ``rankings`` list (market share descending, with 7d/30d share change), and
+    a ``movers`` block of gainers/losers for ``window`` ("7d" or "30d"). Always
+    returns a structured object, even on a brand-new database.
+
+    Defined before ``/stablecoins/{symbol}`` so the literal path is not shadowed
+    by the symbol lookup.
+    """
+    from services.dominance import compute_dominance, market_share_movers
+
+    if window not in ("7d", "30d"):
+        raise HTTPException(status_code=422, detail="window must be '7d' or '30d'")
+    result = compute_dominance(limit=limit)
+    result["movers"] = market_share_movers(window=window, limit=movers_limit)
+    return result
+
+
 @app.get("/regimes")
 def list_regimes() -> list[dict]:
     """Current risk regime per asset, most severe first.

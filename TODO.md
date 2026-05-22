@@ -602,7 +602,34 @@ Where:
 
 ---
 
-## 9. Add Stablecoin Dominance and Market Share
+## 9. Add Stablecoin Dominance and Market Share  (DONE 2026-05-22)
+
+Implemented in `services/dominance.py`. `compute_dominance()` reads
+`supply_snapshots` (no schema/pipeline change, consistent with the #7/#8
+read-time approach), collapses ticker-collision rows to the dominant value, and
+returns total tracked supply, asset count, the dominant asset + its share, and a
+`rankings` list (market share desc) where each asset carries 7d and 30d
+market-share-ago + share-change in percentage points. A window's "share N days
+ago" is only computed from a snapshot at least half the window old (otherwise
+`None` — insufficient history), and the past-share denominator sums only assets
+with sufficiently-old history so a newly-tracked coin is not credited a phantom
+swing. `market_share_movers(window)` derives gainers/losers from the same
+rankings. Exposed via `GET /stablecoins/rankings?window=7d|30d` (registered
+before `/stablecoins/{symbol}` so it isn't shadowed; bundles `rankings` +
+`movers`) and surfaced as a "Market Dominance & Share" section in the Supply tab:
+headline dominance KPIs, a market-share donut (top 10 + Other), a gainers/losers
+split for the selected window, and a full ranking table. Tests in
+`tests/test_dominance.py`.
+
+Remaining / follow-ups:
+- Share history over time (a dominance-over-time stacked area) would need either
+  storing computed shares or recomputing per historical snapshot; the current
+  view is point-in-time + window deltas.
+- The market-share denominator is *tracked* supply, not the whole stablecoin
+  market — fine for relative momentum, but note it in the UI if more assets are
+  added later.
+- Per-asset dominance (current share + 7d/30d change) could be wired into the
+  Asset Profile page's supply section, reusing `compute_dominance`.
 
 ### Objective
 
@@ -1053,7 +1080,7 @@ These are the highest-value next tasks for an AI coding agent:
 7. ~~Add explainable score drilldowns.~~ (DONE 2026-05-21 — `/stablecoins/{symbol}/score-explanation` + Risk Scores / Profile drilldown)
 8. ~~Add risk events timeline.~~ (DONE 2026-05-21)
 9. ~~Add chain concentration risk.~~ (DONE 2026-05-21 — `services/chain_concentration.py`, `/stablecoins/{symbol}/chain-supply` + `/stablecoins/chain-concentration`, Supply-tab heatmap + table)
-10. Add stablecoin dominance and market share.
+10. ~~Add stablecoin dominance and market share.~~ (DONE 2026-05-22 — `services/dominance.py`, `/stablecoins/rankings`, Supply-tab Market Dominance section)
 
 ---
 

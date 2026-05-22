@@ -464,6 +464,15 @@ def load_chain_supply(symbol: str) -> dict | None:
     return get_chain_concentration(symbol)
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def load_dominance(window: str = "7d", limit: int = 50, movers_limit: int = 10) -> dict:
+    from services.dominance import compute_dominance, market_share_movers
+
+    result = compute_dominance(limit=limit)
+    result["movers"] = market_share_movers(window=window, limit=movers_limit)
+    return result
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def load_pipeline_runs(limit: int = 100) -> dict:
     from services.pipeline_runs import pipeline_status_summary, query_runs
@@ -1337,6 +1346,149 @@ CONCENTRATION_COLORS = {
 CHAIN_WARN_PCT = 75
 
 
+def render_market_dominance() -> None:
+    """Market share & competitive momentum: dominance chart, gainers/losers, table."""
+    _section_header(
+        "Market Dominance & Share",
+        "Stablecoins compete for the same job — being the dollar of crypto — so an asset's "
+        "share of total tracked supply, and whether that share is rising or falling, signals "
+        "competitive momentum that raw supply alone hides.",
+    )
+
+    with st.expander("How is market share measured?"):
+        st.markdown(
+            "**Market share** is an asset's circulating supply divided by the total supply of "
+            "all tracked stablecoins. **Dominance** is the share held by the single largest "
+            "asset.\n\n"
+            "**Share change** is the move in percentage points over the window. A coin can grow "
+            "its supply yet still *lose* share if the rest of the market grew faster.\n\n"
+            "Share change is only shown once there is at least half a window of history; until "
+            "then it reads `—` rather than guessing."
+        )
+
+    # View-only control: which window's share change to show (does not change how
+    # the app fetches data, so it needs no auth gate).
+    window = st.radio(
+        "Share-change window",
+        options=["7d", "30d"],
+        horizontal=True,
+        key="dominance_window",
+    )
+
+    data = load_dominance(window=window, limit=100, movers_limit=8)
+    rankings = data.get("rankings", [])
+    if not rankings:
+        _callout(
+            "No supply data yet. Run <code>python -m pipelines.update_supply</code>.",
+            "info",
+        )
+        return
+
+    change_key = f"market_share_change_{window}"
+
+    # ── headline metrics ──
+    k1, k2, k3 = st.columns(3)
+    k1.markdown(_stat_card(
+        "Total Tracked Supply", _fmt_supply(data["total_tracked_supply"]),
+        f"Combined circulating supply across {data['asset_count']} tracked stablecoins.",
+        C_BLUE,
+    ), unsafe_allow_html=True)
+    k2.markdown(_stat_card(
+        "Top Asset", data["top_asset"] or "—",
+        "The most dominant stablecoin by supply.",
+        C_PRIMARY,
+    ), unsafe_allow_html=True)
+    k3.markdown(_stat_card(
+        "Dominance", f"{data['top_asset_share']:.1f}%" if data["top_asset_share"] is not None else "—",
+        f"{data['top_asset']}'s share of total tracked supply.",
+        C_GREEN,
+    ), unsafe_allow_html=True)
+
+    st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
+
+    # ── dominance pie: top 10 + Other ──
+    top = rankings[:10]
+    other_share = sum(r["market_share"] for r in rankings[10:])
+    labels = [r["asset"] for r in top]
+    values = [r["market_share"] for r in top]
+    if other_share > 0:
+        labels.append("Other")
+        values.append(round(other_share, 2))
+    fig = go.Figure(go.Pie(
+        labels=labels,
+        values=values,
+        hole=0.55,
+        sort=False,
+        textinfo="label+percent",
+        hovertemplate="<b>%{label}</b><br>%{value:.2f}% of market<extra></extra>",
+        marker=dict(line=dict(color="rgba(0,0,0,0)", width=1)),
+    ))
+    fig.update_layout(**_chart_layout(
+        title="Market share of tracked stablecoin supply",
+        height=380,
+        showlegend=False,
+    ))
+    st.plotly_chart(fig, use_container_width=True)
+
+    # ── gainers / losers for the selected window ──
+    movers = data.get("movers", {})
+    gainers, losers = movers.get("gainers", []), movers.get("losers", [])
+    if not gainers and not losers:
+        _callout(
+            f"Share change over {window} will appear once there is at least half a window of "
+            "supply history.",
+            "info",
+        )
+    else:
+        st.markdown(f"#### Biggest share movers ({window})")
+        gc, lc = st.columns(2)
+        with gc:
+            st.markdown("**Gaining share**")
+            if gainers:
+                st.dataframe(
+                    pd.DataFrame([
+                        {"Symbol": m["asset"],
+                         "Share": f"{m['market_share']:.2f}%",
+                         "Change": f"+{m['market_share_change']:.2f} pp"}
+                        for m in gainers
+                    ]),
+                    use_container_width=True, hide_index=True,
+                )
+            else:
+                st.caption("No assets gained share this window.")
+        with lc:
+            st.markdown("**Losing share**")
+            if losers:
+                st.dataframe(
+                    pd.DataFrame([
+                        {"Symbol": m["asset"],
+                         "Share": f"{m['market_share']:.2f}%",
+                         "Change": f"{m['market_share_change']:.2f} pp"}
+                        for m in losers
+                    ]),
+                    use_container_width=True, hide_index=True,
+                )
+            else:
+                st.caption("No assets lost share this window.")
+
+    # ── full ranking table ──
+    def _fmt_change(v: float | None) -> str:
+        if v is None:
+            return "—"
+        return f"{'+' if v >= 0 else ''}{v:.2f} pp"
+
+    table = pd.DataFrame([
+        {
+            "Symbol":        r["asset"],
+            "Supply":        _fmt_supply(r["circulating_supply"]),
+            "Market Share":  f"{r['market_share']:.2f}%",
+            f"Δ Share ({window})": _fmt_change(r[change_key]),
+        }
+        for r in rankings
+    ])
+    st.dataframe(table, use_container_width=True, hide_index=True)
+
+
 def render_chain_concentration() -> None:
     """Cross-asset chain concentration: warning, asset×chain heatmap, table."""
     _section_header(
@@ -1534,6 +1686,9 @@ exploit, the stablecoin becomes temporarily unusable.
         st.plotly_chart(fig2, use_container_width=True)
     else:
         _callout("Supply history will appear after the pipeline has run on multiple days.", "info")
+
+    st.divider()
+    render_market_dominance()
 
     st.divider()
     render_chain_concentration()
