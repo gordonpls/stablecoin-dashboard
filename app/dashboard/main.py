@@ -522,6 +522,13 @@ def load_watchlist() -> list[dict]:
 
 
 @st.cache_data(ttl=60, show_spinner=False)
+def load_alerts() -> list[dict]:
+    from services.alerts import list_alerts
+
+    return list_alerts()
+
+
+@st.cache_data(ttl=60, show_spinner=False)
 def load_watchlist_symbols() -> list[str]:
     from services.watchlist import watchlist_symbols
 
@@ -2778,6 +2785,220 @@ def render_data_quality(data: dict) -> None:
     st.divider()
 
 
+ALERT_STATUS_COLORS = {
+    "triggered": C_RED,
+    "ok":        C_GREEN,
+    "no_data":   C_MUTED,
+    "paused":    C_MUTED,
+}
+
+ALERT_STATUS_LABELS = {
+    "triggered": "Triggered",
+    "ok":        "OK",
+    "no_data":   "No data",
+    "paused":    "Paused",
+}
+
+
+def _fmt_alert_value(metric: str | None, value: float | None) -> str:
+    """Format a metric value for the alerts table, matching the metric's unit."""
+    if value is None:
+        return "—"
+    if metric == "peg_deviation_bps":
+        return f"{value:.0f} bps"
+    if metric == "price":
+        return f"${value:.4f}"
+    if metric == "overall_score":
+        return f"{value:.0f}"
+    if metric in ("liquidity_usd", "circulating_supply"):
+        return f"${value:,.0f}"
+    return f"{value:g}"
+
+
+def _render_alert_editor(alerts: list[dict]) -> None:
+    """Password-gated create / enable-disable / delete controls for alert rules."""
+    from services.alerts import (
+        COMPARATORS,
+        SEVERITIES,
+        SUPPORTED_METRICS,
+        create_alert,
+        delete_alert,
+        update_alert,
+    )
+
+    with st.expander("Manage alerts (password required)"):
+        st.caption(
+            "Create a threshold rule, pause/resume it, or delete it. Editing is "
+            "password-protected — anonymous changes to monitoring rules are not allowed."
+        )
+        symbols = load_all_symbols()
+        if not symbols:
+            _callout("No tracked assets to alert on yet — ingest data first.", "info")
+            return
+
+        def cmp_label(c: str) -> str:
+            return "≥ at or above" if c == "above" else "≤ at or below"
+
+        st.markdown("**Create a new alert**")
+        c1, c2 = st.columns(2)
+        sym = c1.selectbox("Asset", options=symbols, key="alert_new_sym")
+        metric = c2.selectbox(
+            "Metric", options=list(SUPPORTED_METRICS),
+            format_func=lambda m: SUPPORTED_METRICS[m]["label"], key="alert_new_metric",
+        )
+        c3, c4, c5 = st.columns(3)
+        comparator = c3.selectbox(
+            "Condition", options=list(COMPARATORS),
+            format_func=cmp_label, key="alert_new_cmp",
+        )
+        threshold = c4.number_input("Threshold", value=50.0, step=1.0, key="alert_new_thr")
+        severity = c5.selectbox(
+            "Severity", options=list(SEVERITIES), index=1,
+            format_func=str.capitalize, key="alert_new_sev",
+        )
+        note = st.text_input("Note (optional)", key="alert_new_note")
+        unit = SUPPORTED_METRICS[metric]["unit"]
+        st.caption(
+            f"Fires when {SUPPORTED_METRICS[metric]['label']} is "
+            f"{cmp_label(comparator)} {threshold:g} ({unit})."
+        )
+        new_pwd = st.text_input("Password", type="password", key="alert_new_pwd")
+        if st.button("Create alert", use_container_width=True, key="alert_new_btn"):
+            if new_pwd != DASHBOARD_PASSWORD:
+                st.error("Incorrect or missing password.")
+            else:
+                try:
+                    created = create_alert(
+                        symbol=sym, metric=metric, threshold=float(threshold),
+                        comparator=comparator, severity=severity, note=note or None,
+                    )
+                except ValueError as exc:
+                    st.error(str(exc))
+                else:
+                    if created is None:
+                        st.error(f"{sym} is not a tracked stablecoin.")
+                    else:
+                        st.cache_data.clear()
+                        st.success(f"Alert created: {created['symbol']} {created['condition']}.")
+                        st.rerun()
+
+        if alerts:
+            st.markdown("---")
+            st.markdown("**Edit an existing alert**")
+            labels = {
+                a["id"]: f"#{a['id']} — {a['symbol']} {a['condition']} "
+                         f"({a['severity']}{'' if a['active'] else ', paused'})"
+                for a in alerts
+            }
+            chosen = st.selectbox(
+                "Select alert", options=list(labels),
+                format_func=lambda i: labels[i], key="alert_edit_sel",
+            )
+            target = next(a for a in alerts if a["id"] == chosen)
+            edit_pwd = st.text_input("Password", type="password", key="alert_edit_pwd")
+            b1, b2 = st.columns(2)
+            toggle_label = "Pause" if target["active"] else "Resume"
+            if b1.button(toggle_label, use_container_width=True, key="alert_toggle_btn"):
+                if edit_pwd != DASHBOARD_PASSWORD:
+                    st.error("Incorrect or missing password.")
+                else:
+                    update_alert(chosen, active=not target["active"])
+                    st.cache_data.clear()
+                    st.rerun()
+            if b2.button("Delete", use_container_width=True, key="alert_delete_btn"):
+                if edit_pwd != DASHBOARD_PASSWORD:
+                    st.error("Incorrect or missing password.")
+                else:
+                    delete_alert(chosen)
+                    st.cache_data.clear()
+                    st.rerun()
+
+
+def render_alerts_tab(alerts: list[dict]) -> None:
+    _section_header(
+        "Alerts",
+        "User-defined threshold rules on a single metric for one asset — e.g. "
+        "“USDT peg deviation ≥ 50 bps” or “USDC risk score ≤ 70”. Each rule is "
+        "evaluated against the latest data; rules currently in breach are flagged "
+        "below. Editing is password-protected.",
+    )
+
+    triggered = [a for a in alerts if a.get("triggered")]
+    active = [a for a in alerts if a.get("active")]
+
+    if not alerts:
+        _callout(
+            "No alert rules yet. Add one from the “Manage alerts” editor below "
+            "(password required) to be notified when a metric crosses a threshold.",
+            "info",
+        )
+    elif triggered:
+        sev_counts = {"high": 0, "medium": 0, "low": 0}
+        for a in triggered:
+            sev_counts[a.get("severity", "low")] = sev_counts.get(a.get("severity", "low"), 0) + 1
+        kind = "danger" if sev_counts["high"] else "warning"
+        parts = [f"{n} {label}" for label, n in
+                 (("high", sev_counts["high"]), ("medium", sev_counts["medium"]),
+                  ("low", sev_counts["low"])) if n]
+        breakdown = f" ({', '.join(parts)})" if parts else ""
+        noun = "rule" if len(triggered) == 1 else "rules"
+        _callout(
+            f"<strong>{len(triggered)} alert {noun} currently triggered</strong>{breakdown}. "
+            "See the highlighted rows below.",
+            kind,
+        )
+    else:
+        n = len(active)
+        _callout(
+            f"All {n} active alert rule{'' if n == 1 else 's'} are within their "
+            "thresholds. Nothing is currently triggered.",
+            "info",
+        )
+
+    if alerts:
+        sev_rank = {"high": 0, "medium": 1, "low": 2}
+        # Triggered first, then by severity, then newest.
+        ordered = sorted(
+            alerts,
+            key=lambda a: (not a.get("triggered"), sev_rank.get(a.get("severity"), 9)),
+        )
+        table = pd.DataFrame([
+            {
+                "Status":   ALERT_STATUS_LABELS.get(a.get("status"), a.get("status", "")),
+                "Severity": a.get("severity", "").capitalize(),
+                "Asset":    a.get("symbol", ""),
+                "Condition": a.get("condition", ""),
+                "Current":  _fmt_alert_value(a.get("metric"), a.get("current_value")),
+                "Active":   "Yes" if a.get("active") else "No",
+                "Last fired": (_fmt_event_time(a["last_triggered_at"])
+                               if a.get("last_triggered_at") else "—"),
+                "Note":     a.get("note") or "",
+            }
+            for a in ordered
+        ])
+
+        def _color_status(val: str) -> str:
+            key = {v: k for k, v in ALERT_STATUS_LABELS.items()}.get(val)
+            c = ALERT_STATUS_COLORS.get(key, "")
+            weight = "700" if key == "triggered" else "600"
+            return f"color:{c}; font-weight:{weight};" if c else ""
+
+        def _color_sev(val: str) -> str:
+            c = SEVERITY_COLORS.get(val.lower(), "")
+            return f"color:{c}; font-weight:700;" if c else ""
+
+        st.dataframe(
+            table.style
+                .map(_color_status, subset=["Status"])
+                .map(_color_sev, subset=["Severity"]),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    _render_alert_editor(alerts)
+    st.divider()
+
+
 def render_api_tab() -> None:
     render_readiness(load_readiness())
 
@@ -2838,13 +3059,14 @@ def main() -> None:
     render_header(overview_df)
     render_market_changes(load_market_changes())
 
-    tab_overview, tab_profile, tab_supply, tab_peg, tab_risk, tab_events, tab_api = st.tabs([
+    tab_overview, tab_profile, tab_supply, tab_peg, tab_risk, tab_events, tab_alerts, tab_api = st.tabs([
         "Overview",
         "Asset Profile",
         "Supply",
         "Peg Deviation",
         "Risk Scores",
         "Risk Events",
+        "Alerts",
         "API Usage",
     ])
 
@@ -2860,6 +3082,8 @@ def main() -> None:
         render_risk_tab(scores_df)
     with tab_events:
         render_risk_events_tab(load_risk_events())
+    with tab_alerts:
+        render_alerts_tab(load_alerts())
     with tab_api:
         render_api_tab()
 

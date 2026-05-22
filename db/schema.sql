@@ -164,3 +164,25 @@ CREATE TABLE IF NOT EXISTS watchlist (
     note      TEXT,                                                 -- optional operator note
     added_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS alerts (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol            TEXT NOT NULL REFERENCES stablecoins(symbol),
+    metric            TEXT NOT NULL,         -- peg_deviation_bps | price | liquidity_usd | overall_score | circulating_supply
+    comparator        TEXT NOT NULL,         -- above (value >= threshold) | below (value <= threshold)
+    threshold         REAL NOT NULL,
+    severity          TEXT NOT NULL DEFAULT 'medium',  -- low | medium | high
+    note              TEXT,
+    active            BOOLEAN NOT NULL DEFAULT 1,
+    created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_evaluated_at TIMESTAMP,             -- last time the scoring pipeline evaluated this rule
+    last_triggered_at TIMESTAMP,             -- last time the rule was in breach
+    last_value        REAL                   -- metric value at the last evaluation
+);
+
+CREATE INDEX IF NOT EXISTS idx_alerts_symbol
+    ON alerts(symbol);
+
+CREATE INDEX IF NOT EXISTS idx_alerts_active
+    ON alerts(active, created_at DESC);

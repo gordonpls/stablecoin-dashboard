@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Generator
 
-from sqlalchemy import create_engine, Column, String, Float, Integer, Text, DateTime, Date
+from sqlalchemy import create_engine, Column, String, Float, Integer, Text, DateTime, Date, Boolean
 from sqlalchemy.orm import DeclarativeBase, Session
 
 def _default_db_url() -> str:
@@ -285,6 +285,46 @@ class WatchlistItem(Base):
     symbol   = Column(String, nullable=False, unique=True)
     note     = Column(Text)
     added_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    def to_dict(self) -> dict:
+        return {c.key: getattr(self, c.key) for c in self.__table__.columns}
+
+
+class Alert(Base):
+    """A user-defined threshold rule on one metric for one asset.
+
+    Distinct from ``RiskEvent`` (auto-detected step changes) and
+    ``DataQualityWarning`` (data-integrity problems): an alert is an *explicit,
+    persistent rule the operator created* — e.g. "USDT peg deviation at or above
+    50 bps" or "USDC overall risk score at or below 70". Each rule names a
+    ``metric``, a ``comparator`` ("above" → value ≥ threshold, "below" → value ≤
+    threshold), and a ``threshold``. ``services.alerts`` evaluates rules against
+    the latest stored snapshot using the same latest-value primitives as
+    ``services.risk_events``, so an alert and the risk-event timeline can never
+    read a metric differently.
+
+    Editing is gated behind the dashboard password (anonymous controls that
+    change app behaviour are not allowed). ``active`` lets a rule be paused
+    without deleting it; ``last_triggered_at`` / ``last_value`` /
+    ``last_evaluated_at`` record the most recent pipeline evaluation so the UI
+    can show when a rule last fired.
+    """
+
+    __tablename__ = "alerts"
+
+    id                = Column(Integer, primary_key=True, autoincrement=True)
+    symbol            = Column(String, nullable=False)
+    metric            = Column(String, nullable=False)   # peg_deviation_bps | price | liquidity_usd | overall_score | circulating_supply
+    comparator        = Column(String, nullable=False)   # above | below
+    threshold         = Column(Float, nullable=False)
+    severity          = Column(String, nullable=False, default="medium")  # low | medium | high
+    note              = Column(Text)
+    active            = Column(Boolean, nullable=False, default=True)
+    created_at        = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at        = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    last_evaluated_at = Column(DateTime)
+    last_triggered_at = Column(DateTime)
+    last_value        = Column(Float)
 
     def to_dict(self) -> dict:
         return {c.key: getattr(self, c.key) for c in self.__table__.columns}
