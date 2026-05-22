@@ -161,3 +161,58 @@ def test_make_engine_uses_nullpool_for_file_db(tmp_path):
 
     eng = _make_engine(f"sqlite:///{tmp_path / 'probe.db'}")
     assert isinstance(eng.pool, NullPool)
+
+
+# ── writable-path resolution (read-only deploy, e.g. Streamlit Cloud) ────────────
+
+def test_is_writable_true_for_normal_file(tmp_path):
+    from db.models import _is_writable
+
+    f = tmp_path / "ok.db"
+    f.write_bytes(b"")
+    assert _is_writable(str(f)) is True
+
+
+def test_is_writable_false_for_readonly_file(tmp_path):
+    """A committed DB on a read-only mount must be reported non-writable."""
+    import os
+    import stat
+    from db.models import _is_writable
+
+    f = tmp_path / "ro.db"
+    f.write_bytes(b"")
+    os.chmod(f, stat.S_IRUSR)  # read-only
+    try:
+        # Skip if running as root, where file perms are bypassed.
+        if os.access(str(f), os.W_OK):
+            pytest.skip("running as root; file permissions are bypassed")
+        assert _is_writable(str(f)) is False
+    finally:
+        os.chmod(f, stat.S_IRUSR | stat.S_IWUSR)
+
+
+def test_resolve_db_url_uses_writable_repo(tmp_path):
+    """A writable repo DB is used directly (the local-dev case)."""
+    from db.models import _resolve_db_url
+
+    f = tmp_path / "stablecoin.db"
+    f.write_bytes(b"")
+    assert _resolve_db_url(str(f)) == f"sqlite:///{f}"
+
+
+def test_resolve_db_url_falls_back_and_seeds_tmp(tmp_path, monkeypatch):
+    """When the repo DB isn't writable, fall back to a /tmp copy seeded from it."""
+    import db.models as m
+
+    repo_db = tmp_path / "stablecoin.db"
+    repo_db.write_bytes(b"SEEDDATA")
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+
+    monkeypatch.setattr(m, "_is_writable", lambda p: False)
+    monkeypatch.setattr(m.tempfile, "gettempdir", lambda: str(tmpdir))
+
+    url = m._resolve_db_url(str(repo_db))
+    seeded = tmpdir / "stablecoin.db"
+    assert url == f"sqlite:///{seeded}"
+    assert seeded.read_bytes() == b"SEEDDATA"  # seeded from committed DB

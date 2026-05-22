@@ -1,6 +1,8 @@
 """SQLAlchemy ORM models + session factory."""
 
 import os
+import shutil
+import tempfile
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Generator
@@ -9,19 +11,58 @@ from sqlalchemy import create_engine, event, Column, String, Float, Integer, Tex
 from sqlalchemy.orm import DeclarativeBase, Session
 from sqlalchemy.pool import NullPool
 
-def _default_db_url() -> str:
-    # On Streamlit Cloud the repo root is a read-only mount; fall back to /tmp.
-    candidate = os.path.join(os.path.dirname(__file__), "..", "stablecoin.db")
-    candidate = os.path.abspath(candidate)
+
+def _is_writable(path: str) -> bool:
+    """True only if SQLite could actually write at *path*.
+
+    A directory-level os.access check is unreliable on Streamlit Cloud (the repo
+    dir reports writable while the committed file sits on a read-only overlay),
+    so we test for real. SQLite needs to write BOTH the DB file and a sidecar
+    journal/WAL file next to it, so we verify the parent directory accepts new
+    files AND, if the DB already exists, that the file itself is writable.
+    Opening for append does not modify the file's contents.
+    """
+    parent = os.path.dirname(path) or "."
     try:
-        # Test writeability by touching the file or its parent directory.
-        parent = os.path.dirname(candidate)
-        if os.access(parent, os.W_OK):
-            return f"sqlite:///{candidate}"
-    except Exception:
-        pass
-    import tempfile
-    return f"sqlite:///{os.path.join(tempfile.gettempdir(), 'stablecoin.db')}"
+        probe = os.path.join(parent, f".write_probe_{os.getpid()}")
+        with open(probe, "w"):
+            pass
+        os.remove(probe)
+    except OSError:
+        return False
+
+    if os.path.exists(path):
+        try:
+            with open(path, "a"):
+                pass
+        except OSError:
+            return False
+    return True
+
+
+def _resolve_db_url(repo_db: str) -> str:
+    """Resolve a *writable* SQLite path, seeding it from the committed DB.
+
+    Locally the repo file is writable and used directly. On a read-only deploy
+    (Streamlit Cloud) we fall back to a /tmp copy — seeded once from the
+    committed DB so the hosted app still shows the bundled historical data,
+    while pipelines can write fresh snapshots to the writable copy.
+    """
+    if _is_writable(repo_db):
+        return f"sqlite:///{repo_db}"
+
+    tmp_db = os.path.join(tempfile.gettempdir(), "stablecoin.db")
+    if not os.path.exists(tmp_db) and os.path.exists(repo_db):
+        try:
+            shutil.copy2(repo_db, tmp_db)  # seed with committed data
+        except OSError:
+            pass
+    return f"sqlite:///{tmp_db}"
+
+
+def _default_db_url() -> str:
+    repo_db = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "stablecoin.db"))
+    return _resolve_db_url(repo_db)
 
 
 def _make_engine(url: str):
