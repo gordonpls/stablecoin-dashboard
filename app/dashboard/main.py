@@ -104,11 +104,12 @@ C_ORANGE   = "#f97316"
 C_RED      = "#ef4444"
 C_MUTED    = "rgba(100,100,100,0.9)"
 
+# Stability grade for the composite score (S&P-style stablecoin stability tiers).
 RISK_COLORS = {
-    "Low Risk":  C_GREEN,
-    "Moderate":  C_AMBER,
-    "Elevated":  C_ORANGE,
-    "High Risk": C_RED,
+    "Strong":      C_GREEN,
+    "Adequate":    C_AMBER,
+    "Constrained": C_ORANGE,
+    "Weak":        C_RED,
 }
 
 # Plain-language risk regimes (services/regimes.py). Calm → severe.
@@ -121,17 +122,6 @@ REGIME_COLORS = {
     "High risk":            C_RED,
 }
 
-# Compact badge shown next to the symbol in the Overview table (replaces the
-# standalone Regime column). Calm → severe; data-quality concern is its own mark.
-REGIME_BADGES = {
-    "Stable":               "🟢",
-    "Mild stress":          "🟡",
-    "Data quality concern": "🔵",
-    "Liquidity stress":     "🟠",
-    "Peg stress":           "🟠",
-    "High risk":            "🔴",
-}
-
 SCORE_COLORS = [C_PRIMARY, C_GREEN, C_AMBER, "#ec4899"]
 SCORE_COLS   = ["peg_score", "liquidity_score", "reserve_score", "adoption_score"]
 SCORE_LABELS = ["Peg", "Liquidity", "Reserve", "Adoption"]
@@ -140,15 +130,16 @@ SCORE_LABELS = ["Peg", "Liquidity", "Reserve", "Adoption"]
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def risk_label(score: float | None) -> str:
+    """Stability grade for a composite score (S&P-style stability tiers)."""
     if score is None:
         return "—"
     if score >= 80:
-        return "Low Risk"
+        return "Strong"
     if score >= 60:
-        return "Moderate"
+        return "Adequate"
     if score >= 40:
-        return "Elevated"
-    return "High Risk"
+        return "Constrained"
+    return "Weak"
 
 
 def _fmt_supply(v: float | None) -> str:
@@ -1356,7 +1347,7 @@ def render_overview_tab(df: pd.DataFrame) -> None:
     _section_header(
         "Market Overview",
         "Every tracked stablecoin at a glance, sorted by circulating supply. "
-        "Click any column header to sort. Risk Level is colour-coded — green is safest, red is most concerning.",
+        "Click any column header to sort. Stability is colour-coded — green is safest, red is most concerning.",
     )
 
     with st.expander("What does each column mean?"):
@@ -1369,8 +1360,8 @@ def render_overview_tab(df: pd.DataFrame) -> None:
 | **Top Chain** | The blockchain holding the largest share of supply (e.g. Ethereum, Tron, BSC). |
 | **Peg Deviation** | Distance from $1.00, in basis points. 1 bps = $0.0001. Healthy coins stay within 10 bps. |
 | **Risk Score** | Composite score 0–100. Higher = safer. Weighted across peg, liquidity, reserves, and adoption. |
-| **Risk Level** | Plain-English label: Low Risk (80+), Moderate (60–79), Elevated (40–59), High Risk (<40). |
-| **Regime** | Current condition in plain language: Stable, Mild stress, Peg stress, Liquidity stress, Data quality concern, or High risk. The coloured dot next to each ticker is the same regime at a glance (🟢 Stable · 🟡 Mild stress · 🟠 Peg/Liquidity stress · 🔵 Data-quality concern · 🔴 High risk). Derived from the score and peg, and tracked over time in the Risk Events tab. |
+| **Stability** | Grade of the composite score (S&P-style stability tiers): Strong (80+), Adequate (60–79), Constrained (40–59), Weak (<40). |
+| **Regime** | Current condition in plain language: Stable, Mild stress, Peg stress, Liquidity stress, Data quality concern, or High risk. Derived from the score and peg, and tracked over time in the Risk Events tab. A ⚠️ next to the symbol flags assets in the Data quality concern regime. |
 | **Data Freshness** | How recently this asset's data was updated — the live price for actively-priced coins, otherwise the latest supply snapshot. |
         """)
 
@@ -1384,8 +1375,8 @@ def render_overview_tab(df: pd.DataFrame) -> None:
     # Filters row
     fc1, fc2, fc3 = st.columns([2, 1, 1])
     risk_filter = fc1.selectbox(
-        "Filter by risk level",
-        ["All", "Low Risk", "Moderate", "Elevated", "High Risk"],
+        "Filter by stability",
+        ["All", "Strong", "Adequate", "Constrained", "Weak"],
         key="overview_risk_filter",
     )
     search = fc2.text_input("Search symbol", placeholder="e.g. USDT", key="overview_search")
@@ -1413,9 +1404,10 @@ def render_overview_tab(df: pd.DataFrame) -> None:
         "overall_score", "risk_label", "regime", "data_freshness",
     ]].copy()
 
-    # Quick-scan regime badge next to the ticker; the Regime column shows the label.
+    # Flag a data-quality concern with a ⚠️ next to the ticker (the regime itself
+    # has its own column). Other regimes get no symbol decoration.
     display["symbol"] = [
-        f"{sym} {REGIME_BADGES.get(reg, '')}".strip()
+        f"{sym} ⚠️" if reg == "Data quality concern" else sym
         for sym, reg in zip(filtered["symbol"], filtered["regime"])
     ]
     display["market_cap"]    = display["market_cap"].apply(_fmt_supply)
@@ -1432,7 +1424,7 @@ def render_overview_tab(df: pd.DataFrame) -> None:
         "Symbol", "Market Cap", "Supply",
         "7D Change", "30D Change",
         "Top Chain", "Peg Deviation",
-        "Risk Score", "Risk Level", "Regime", "Data Freshness",
+        "Risk Score", "Stability", "Regime", "Data Freshness",
     ]
 
     def _color_risk(val: str) -> str:
@@ -1444,13 +1436,12 @@ def render_overview_tab(df: pd.DataFrame) -> None:
         return f"color:{c}; font-weight:700;" if c else ""
 
     st.caption(
-        "Badge next to each symbol = risk regime: "
-        "🟢 Stable · 🟡 Mild stress · 🟠 Peg/Liquidity stress · "
-        "🔵 Data-quality concern · 🔴 High risk. Select a row to open that asset's full profile below."
+        "⚠️ next to a symbol flags a data-quality concern with that asset's stored metrics. "
+        "Select a row to open that asset's full profile below."
     )
     event = st.dataframe(
         display.style
-            .map(_color_risk, subset=["Risk Level"])
+            .map(_color_risk, subset=["Stability"])
             .map(_color_regime, subset=["Regime"]),
         use_container_width=True,
         hide_index=True,
@@ -2062,7 +2053,7 @@ def render_risk_tab(df: pd.DataFrame) -> None:
 
 **Overall = Peg × 0.35 + Liquidity × 0.25 + Reserve × 0.25 + Adoption × 0.15**
 
-Risk levels: **Low Risk** 80+  ·  **Moderate** 60–79  ·  **Elevated** 40–59  ·  **High Risk** < 40
+Stability grade: **Strong** 80+  ·  **Adequate** 60–79  ·  **Constrained** 40–59  ·  **Weak** < 40
 
 *Scores are a quantitative starting point, not financial advice.*
         """)
@@ -2146,14 +2137,14 @@ Risk levels: **Low Risk** 80+  ·  **Moderate** 60–79  ·  **Elevated** 40–5
         "symbol", "overall_score", "risk_label",
         "peg_score", "liquidity_score", "reserve_score", "adoption_score",
     ]].copy()
-    display.columns = ["Symbol", "Overall", "Risk Level", "Peg", "Liquidity", "Reserve", "Adoption"]
+    display.columns = ["Symbol", "Overall", "Stability", "Peg", "Liquidity", "Reserve", "Adoption"]
 
     def _color_risk(val: str) -> str:
         c = RISK_COLORS.get(val, "")
         return f"color:{c}; font-weight:700;" if c else ""
 
     st.dataframe(
-        display.style.map(_color_risk, subset=["Risk Level"]),
+        display.style.map(_color_risk, subset=["Stability"]),
         use_container_width=True,
         hide_index=True,
     )

@@ -91,7 +91,7 @@ def test_structure_and_weights(in_memory_db):
     e = explain_scores("USDT")
     assert e["symbol"] == "USDT"
     assert e["overall_score"] == pytest.approx(85.0)
-    assert e["risk_label"] == "Low Risk"
+    assert e["risk_label"] == "Strong"
     assert e["weights"] == SCORE_WEIGHTS
     assert {c["key"] for c in e["components"]} == {"peg", "liquidity", "reserve", "adoption"}
 

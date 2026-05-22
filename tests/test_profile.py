@@ -168,7 +168,7 @@ def test_scores_populated_with_risk_label(in_memory_db):
     _add_score("USDT", overall=85.0)
     sc = get_stablecoin_profile("USDT")["scores"]
     assert sc["overall_score"] == pytest.approx(85.0)
-    assert sc["risk_label"] == "Low Risk"
+    assert sc["risk_label"] == "Strong"
     assert {"peg_score", "liquidity_score", "reserve_score", "adoption_score"} <= set(sc)
 
 
@@ -177,7 +177,7 @@ def test_latest_score_wins(in_memory_db):
     _add_score("USDT", overall=55.0, when=NOW)
     sc = get_stablecoin_profile("USDT")["scores"]
     assert sc["overall_score"] == pytest.approx(55.0)
-    assert sc["risk_label"] == "Elevated"
+    assert sc["risk_label"] == "Constrained"
 
 
 # ── reserves ─────────────────────────────────────────────────────────────────────

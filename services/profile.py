@@ -37,16 +37,16 @@ RESERVE_STALE_DAYS = 90      # a reserve attestation older than this is "stale"
 
 
 def risk_label(score: float | None) -> str:
-    """Plain-language risk band — identical thresholds to the dashboard."""
+    """Stability grade (S&P-style) — identical thresholds to the dashboard."""
     if score is None:
         return "—"
     if score >= 80:
-        return "Low Risk"
+        return "Strong"
     if score >= 60:
-        return "Moderate"
+        return "Adequate"
     if score >= 40:
-        return "Elevated"
-    return "High Risk"
+        return "Constrained"
+    return "Weak"
 
 
 def _iso(dt: datetime | None) -> str | None:
