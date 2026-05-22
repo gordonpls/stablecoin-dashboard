@@ -721,7 +721,37 @@ wanted.
 
 ---
 
-## 11. Add Deployment Readiness Checks
+## 11. Add Deployment Readiness Checks  (DONE 2026-05-22)
+
+Implemented in `services/readiness.py`. `get_readiness()` runs six checks —
+`database` (connectivity via `SELECT 1`), `disk` (writability of the directory
+backing the SQLite file), `environment` (operator-declared required vars via the
+opt-in `REQUIRED_ENV_VARS` allowlist), `configuration` (production-only warnings:
+SQLite in prod, DB under the temp dir, app running from the temp dir),
+`pipelines` (reuses `pipeline_status_summary` for latest success / failing
+pipelines), and `providers` (reuses `compute_data_freshness` provider health) —
+and rolls them into a verdict. Only **database connectivity** and **missing
+required env vars** are critical (block readiness); everything else is a
+non-blocking warning. `GET /health` is now liveness + diagnostics (always 200,
+carries the full `checks` block plus `ready`/`readiness_status`/`version`) while
+the new `GET /ready` returns **503 when not ready** so an orchestrator can gate
+traffic. App version is read from installed package metadata (falls back to
+`0.1.0`). Surfaced as a "Deployment Readiness" panel at the top of the API Usage
+tab (verdict + version, failing/degraded callout, per-check status pills, detail
+table). Tests in `tests/test_readiness.py`; existing `/health` test updated for
+the expanded contract.
+
+Remaining / follow-ups:
+- "Startup checks for required env vars" are evaluated lazily per request via the
+  `environment` check rather than crashing the process at boot — deliberately, so
+  a misconfiguration is *visible* (and shows in `/health`) instead of taking the
+  app down before it can report why. A hard startup gate could be added as a
+  FastAPI/Streamlit startup hook that calls `check_environment()` and refuses to
+  start on a critical fail, if fail-fast is preferred over fail-visible.
+- The production-misconfig signal overlaps the "SQLite fallback to /tmp" logic in
+  `db/models._default_db_url`; consider having that fallback emit a one-off
+  `risk_events`/log entry so an ephemeral-DB deployment is recorded, not just
+  surfaced on read.
 
 ### Objective
 

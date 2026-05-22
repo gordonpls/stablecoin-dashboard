@@ -54,7 +54,12 @@ def _add_price_snapshot(symbol: str = "USDT", price: float = 1.0001) -> None:
 def test_health_returns_ok(in_memory_db):
     resp = client.get("/health")
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ok"}
+    body = resp.json()
+    # Liveness is always "ok"; the expanded payload adds readiness diagnostics.
+    assert body["status"] == "ok"
+    assert isinstance(body["ready"], bool)
+    assert "version" in body
+    assert isinstance(body["checks"], list) and body["checks"]
 
 
 # ── /stablecoins ───────────────────────────────────────────────────────────────

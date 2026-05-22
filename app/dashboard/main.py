@@ -500,6 +500,13 @@ def load_provider_fallback(window_hours: int = 24) -> dict:
     return get_fallback_status(window_hours=window_hours)
 
 
+@st.cache_data(ttl=30, show_spinner=False)
+def load_readiness() -> dict:
+    from services.readiness import get_readiness
+
+    return get_readiness()
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def load_api_usage() -> pd.DataFrame:
     with get_session() as session:
@@ -2057,6 +2064,110 @@ def _age_from_iso(iso_ts: str | None) -> str:
     return _fmt_age((datetime.utcnow() - ts).total_seconds())
 
 
+# Per-check status → colour / label (mirrors services/readiness.py).
+CHECK_STATUS_COLORS = {"pass": C_GREEN, "warn": C_AMBER, "fail": C_RED}
+CHECK_STATUS_LABELS = {"pass": "Pass", "warn": "Warn", "fail": "Fail"}
+CHECK_LABELS = {
+    "database":      "Database",
+    "disk":          "Disk write",
+    "environment":   "Environment",
+    "configuration": "Configuration",
+    "pipelines":     "Pipelines",
+    "providers":     "Providers",
+}
+# Overall readiness verdict → colour / label / callout kind.
+READY_STATUS_COLORS = {"ready": C_GREEN, "degraded": C_AMBER, "not_ready": C_RED}
+READY_STATUS_LABELS = {"ready": "Ready", "degraded": "Degraded", "not_ready": "Not ready"}
+
+
+def render_readiness(report: dict) -> None:
+    _section_header(
+        "Deployment Readiness",
+        "Whether this instance is fit to serve traffic. Liveness (the app is "
+        "running) is separate from readiness (its dependencies are healthy). "
+        "Only database connectivity and missing required environment variables "
+        "block readiness; stale pipelines, a failing provider, a read-only disk, "
+        "or a production misconfiguration are shown as warnings.",
+    )
+
+    checks = report.get("checks", [])
+    overall = report.get("status", "degraded")
+    o_color = READY_STATUS_COLORS.get(overall, C_MUTED)
+    o_label = READY_STATUS_LABELS.get(overall, overall)
+
+    # Headline verdict + version.
+    version = report.get("version", "—")
+    st.markdown(
+        f"<div style='display:flex; align-items:center; gap:10px; margin-bottom:14px;'>"
+        f"<span style='width:11px;height:11px;border-radius:50%;background:{o_color};'></span>"
+        f"<span style='font-size:18px;font-weight:700;color:{o_color};'>{o_label}</span>"
+        f"<span style='color:{C_MUTED};font-size:13px;'>· v{version}</span>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    # Surface anything that fails or warns up front.
+    failures = [c for c in checks if c["status"] == "fail"]
+    warnings = [c for c in checks if c["status"] == "warn"]
+    if failures:
+        names = ", ".join(CHECK_LABELS.get(c["name"], c["name"]) for c in failures)
+        blocking = any(c["critical"] for c in failures)
+        _callout(
+            f"<strong>{names}</strong> failing — "
+            + ("this instance is <strong>not ready</strong> to serve traffic."
+               if blocking else "non-critical, traffic can still be served."),
+            "danger" if blocking else "warning",
+        )
+    elif warnings:
+        names = ", ".join(CHECK_LABELS.get(c["name"], c["name"]) for c in warnings)
+        _callout(
+            f"Running, but degraded: <strong>{names}</strong> "
+            f"{'has' if len(warnings) == 1 else 'have'} warnings. The app can "
+            "still serve data.",
+            "warning",
+        )
+
+    # Per-check status pills.
+    chips = []
+    for c in checks:
+        status = c["status"]
+        color = CHECK_STATUS_COLORS.get(status, C_MUTED)
+        status_txt = CHECK_STATUS_LABELS.get(status, status)
+        label = CHECK_LABELS.get(c["name"], c["name"])
+        chips.append(
+            f"<span style='display:inline-flex; align-items:center; gap:7px; "
+            f"padding:6px 12px; margin:0 8px 8px 0; border-radius:999px; "
+            f"border:1px solid rgba(128,128,128,0.18); font-size:12px;'>"
+            f"<span style='width:8px;height:8px;border-radius:50%;background:{color};'></span>"
+            f"<span style='color:{C_MUTED};'>{label}</span>"
+            f"<span style='font-weight:700;color:{color};'>{status_txt}</span>"
+            f"</span>"
+        )
+    st.markdown("<div style='margin-bottom:14px;'>" + "".join(chips) + "</div>", unsafe_allow_html=True)
+
+    table = pd.DataFrame([
+        {
+            "Check":    CHECK_LABELS.get(c["name"], c["name"]),
+            "Status":   CHECK_STATUS_LABELS.get(c["status"], c["status"]),
+            "Blocking": "Yes" if c["critical"] else "No",
+            "Detail":   c["detail"],
+        }
+        for c in checks
+    ])
+
+    def _color_check(val: str) -> str:
+        key = {v: k for k, v in CHECK_STATUS_LABELS.items()}.get(val)
+        c = CHECK_STATUS_COLORS.get(key, "")
+        return f"color:{c}; font-weight:700;" if c else ""
+
+    st.dataframe(
+        table.style.map(_color_check, subset=["Status"]),
+        use_container_width=True,
+        hide_index=True,
+    )
+    st.divider()
+
+
 def render_data_freshness(freshness: dict) -> None:
     _section_header(
         "Data Freshness",
@@ -2590,6 +2701,8 @@ def render_data_quality(data: dict) -> None:
 
 
 def render_api_tab() -> None:
+    render_readiness(load_readiness())
+
     render_data_freshness(load_data_freshness())
 
     render_provider_fallback(load_provider_fallback())

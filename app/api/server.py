@@ -1,6 +1,6 @@
 """FastAPI server — internal API consumed by the Streamlit dashboard."""
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Response
 from sqlalchemy import select
 from db.models import get_session, Stablecoin, RiskScore, PriceSnapshot
 
@@ -9,7 +9,45 @@ app = FastAPI(title="Stablecoin Dashboard API", version="0.1.0")
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok"}
+    """Liveness + diagnostics. Always 200 while the app can respond.
+
+    ``status`` is always ``ok`` (the process is alive). The ``checks`` block
+    reports database connectivity, disk write access, environment/config,
+    latest pipeline success, and provider availability, and ``ready`` /
+    ``readiness_status`` summarise whether the app is fit to serve traffic — use
+    ``GET /ready`` (which returns 503 when not ready) to gate routing.
+    """
+    from services.readiness import get_readiness
+
+    r = get_readiness()
+    return {
+        "status": "ok",
+        "ready": r["ready"],
+        "readiness_status": r["status"],
+        "version": r["version"],
+        "production": r["production"],
+        "checked_at": r["checked_at"],
+        "checks": r["checks"],
+    }
+
+
+@app.get("/ready")
+def ready(response: Response) -> dict:
+    """Readiness probe: 200 when fit to serve traffic, 503 otherwise.
+
+    Returns the full readiness report. The HTTP status is 503 (not 200) when a
+    *critical* check fails (database unreachable, or a required environment
+    variable is missing), so an orchestrator can hold traffic until the app can
+    actually serve data. Non-critical problems (stale pipelines, a failing
+    provider, a read-only disk, production misconfiguration) keep a 200 but show
+    ``status: "degraded"``.
+    """
+    from services.readiness import get_readiness
+
+    result = get_readiness()
+    if not result["ready"]:
+        response.status_code = 503
+    return result
 
 
 @app.get("/stablecoins")
