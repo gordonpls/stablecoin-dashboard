@@ -15,7 +15,12 @@ from services.market_changes import compute_market_changes
 
 client = TestClient(app)
 
-NOW = datetime(2026, 5, 21, 12, 0, 0)
+# Anchor test data to the real clock (slightly ahead) instead of a fixed date.
+# compute_market_changes windows on datetime.utcnow(), so a hardcoded NOW becomes
+# stale once the wall clock passes it and the "ago" points fall outside the
+# lookback window. The small forward offset keeps the intended points inside the
+# window despite the gap between capturing NOW and the service reading the clock.
+NOW = datetime.utcnow() + timedelta(minutes=1)
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────────
