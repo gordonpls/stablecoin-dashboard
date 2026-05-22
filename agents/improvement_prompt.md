@@ -7,7 +7,11 @@ Repo root: infer from `git rev-parse --show-toplevel`.
 
 Pick EXACTLY ONE task. Apply this priority order:
 
-1. If TODO.md has items, implement the highest-priority one.
+0. **Stability first (TODO.md "Priority 0").** Run `python -m pytest tests/ -x -q`
+   and confirm `app.dashboard.main` and `app.api.server` import cleanly. If the
+   suite is red, the app won't import, or the TODO.md "Discovered Issues" list is
+   non-empty, fixing that IS this invocation's task. A fix always outranks a feature.
+1. Otherwise, if TODO.md has unfinished feature items, implement the highest-priority one.
 2. Otherwise audit the codebase and pick ONE concrete improvement from this list, highest first:
    - A missing feature a user would obviously want
    - A bug or rough edge in existing behavior
@@ -34,6 +38,23 @@ Pick EXACTLY ONE task. Apply this priority order:
 2. Add anything new you noticed to TODO.md.
 3. Append a one-line entry to CHANGELOG.md: `- <date>: <what you did>`
 4. Output `IMPROVEMENT_COMPLETE` as your final line.
+
+## When there is genuinely nothing left to do
+
+If — and only if — ALL of the following are true:
+- the test suite is green and both apps import cleanly,
+- the TODO.md "Discovered Issues" list is empty,
+- there are no unfinished feature items in TODO.md, and
+- a good-faith audit surfaces no concrete bug, performance, UX, or quality fix worth making,
+
+then do NOT invent busywork. Make no file changes and output exactly:
+
+```
+ALL_TASKS_COMPLETE
+```
+
+as your final line (instead of `IMPROVEMENT_COMPLETE`). This is the only signal that
+stops a `--until-done` loop cleanly, so do not emit it prematurely while real work remains.
 
 ## Project structure reference
 
