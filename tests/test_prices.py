@@ -98,6 +98,48 @@ async def test_peg_prices_all_fail_returns_none():
 
 
 @pytest.mark.asyncio
+async def test_coingecko_batch_fallback_when_exchanges_fail():
+    """When Binance and Coinbase return nothing, fill from one CoinGecko batch call."""
+    calls: list[str] = []
+
+    async def fake_tracked_get(provider, endpoint=None, url=None, **kwargs):
+        calls.append(provider)
+        if provider in ("binance", "coinbase"):
+            raise Exception(f"{provider} unavailable")
+        if provider == "coingecko":
+            # one call returns prices for all requested ids
+            return {"frax": {"usd": 0.998}, "binance-usd": {"usd": 1.0}}
+        raise AssertionError(f"unexpected provider: {provider}")
+
+    with patch("ingestion.exchanges.tracked_get", side_effect=fake_tracked_get):
+        result = await get_peg_prices(["FRAX", "BUSD"])
+
+    assert result["FRAX"]["price"] == pytest.approx(0.998)
+    assert result["FRAX"]["price_source"] == "coingecko"
+    assert result["FRAX"]["source_type"] == "fallback"
+    assert result["FRAX"]["peg_deviation_bps"] == pytest.approx(20.0, abs=0.1)
+    assert result["BUSD"]["price"] == pytest.approx(1.0)
+    # CoinGecko must be hit exactly once (batch), not per-symbol
+    assert calls.count("coingecko") == 1
+
+
+@pytest.mark.asyncio
+async def test_coingecko_not_called_when_exchange_succeeds():
+    async def fake_tracked_get(provider, endpoint=None, url=None, **kwargs):
+        if provider == "binance" and endpoint == "ticker_price":
+            return {"price": "1.0001"}
+        if provider == "binance" and endpoint == "order_book_depth":
+            return {"bids": [], "asks": []}
+        raise AssertionError(f"unexpected provider: {provider}")  # coingecko must NOT be called
+
+    with patch("ingestion.exchanges.tracked_get", side_effect=fake_tracked_get):
+        result = await get_peg_prices(["USDC"])
+
+    assert result["USDC"]["price"] == pytest.approx(1.0001)
+    assert result["USDC"]["price_source"] == "binance"
+
+
+@pytest.mark.asyncio
 async def test_perfect_peg_zero_deviation():
     async def fake_tracked_get(provider, endpoint, url, **kwargs):
         if endpoint == "ticker_price":
