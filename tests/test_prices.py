@@ -1,9 +1,24 @@
 """Tests for exchange price ingestion — mocks tracked_get, not httpx."""
 
+import httpx
 import pytest
 from unittest.mock import AsyncMock, patch
 
+import ingestion.exchanges as ex
 from ingestion.exchanges import get_peg_prices, _binance_price, _coinbase_price, _binance_depth
+
+
+@pytest.fixture(autouse=True)
+def _reset_binance_breaker():
+    """The geo-block breaker is process-level state; reset it around each test."""
+    ex._binance_blocked_until = 0.0
+    yield
+    ex._binance_blocked_until = 0.0
+
+
+def _http_451() -> httpx.HTTPStatusError:
+    req = httpx.Request("GET", "https://api.binance.com/api/v3/ticker/price")
+    return httpx.HTTPStatusError("blocked", request=req, response=httpx.Response(451, request=req))
 
 
 @pytest.mark.asyncio
@@ -121,6 +136,31 @@ async def test_coingecko_batch_fallback_when_exchanges_fail():
     assert result["BUSD"]["price"] == pytest.approx(1.0)
     # CoinGecko must be hit exactly once (batch), not per-symbol
     assert calls.count("coingecko") == 1
+
+
+@pytest.mark.asyncio
+async def test_binance_geo_block_trips_circuit_breaker():
+    """After a 451, Binance is skipped on subsequent calls (no repeated hammering)."""
+    binance_calls = 0
+
+    async def fake_tracked_get(provider, endpoint=None, url=None, **kwargs):
+        nonlocal binance_calls
+        if provider == "binance":
+            binance_calls += 1
+            raise _http_451()
+        if provider == "coinbase":
+            return {"data": {"amount": "0.9999"}}
+        raise AssertionError(f"unexpected provider: {provider}")
+
+    with patch("ingestion.exchanges.tracked_get", side_effect=fake_tracked_get):
+        r1 = await get_peg_prices(["USDT"])      # binance 451 -> trips breaker, coinbase fills
+        calls_after_first = binance_calls
+        r2 = await get_peg_prices(["USDC"])      # binance now skipped entirely
+
+    assert r1["USDT"]["price"] == pytest.approx(0.9999)
+    assert r2["USDC"]["price"] == pytest.approx(0.9999)
+    assert calls_after_first >= 1                 # Binance was tried before the block
+    assert binance_calls == calls_after_first     # ...and not called again afterward
 
 
 @pytest.mark.asyncio

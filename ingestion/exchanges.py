@@ -4,11 +4,36 @@ No auth required. All HTTP calls go through core.http.tracked_get.
 """
 
 import logging
+import time
 from typing import Any
+
+import httpx
 
 from core.http import tracked_get
 
 logger = logging.getLogger(__name__)
+
+# Binance geo-blocks some datacenter regions with HTTP 451 (e.g. Streamlit Cloud).
+# That block is effectively permanent for the deploy location, so once we see it
+# we stop calling Binance for a cooldown — otherwise every refresh hammers a dead
+# provider and floods the logs with identical 451 errors. Coinbase/CoinGecko cover
+# the price; order-book depth (Binance-only) is simply unavailable while blocked.
+_BINANCE_BLOCK_COOLDOWN = 3600.0  # seconds
+_binance_blocked_until = 0.0
+
+
+def _binance_available() -> bool:
+    return time.monotonic() >= _binance_blocked_until
+
+
+def _mark_binance_blocked() -> None:
+    global _binance_blocked_until
+    if _binance_available():  # log only on the transition, not every skip
+        logger.warning(
+            "binance_geo_blocked status=451 — skipping Binance for %.0fs",
+            _BINANCE_BLOCK_COOLDOWN,
+        )
+    _binance_blocked_until = time.monotonic() + _BINANCE_BLOCK_COOLDOWN
 
 BINANCE_BASE = "https://api.binance.com/api/v3"
 COINBASE_BASE = "https://api.coinbase.com/v2/prices"
@@ -36,7 +61,17 @@ COINGECKO_IDS: dict[str, str] = {
 }
 
 
+def _is_geo_block(exc: Exception) -> bool:
+    return (
+        isinstance(exc, httpx.HTTPStatusError)
+        and exc.response is not None
+        and exc.response.status_code == 451
+    )
+
+
 async def _binance_price(pair: str) -> float | None:
+    if not _binance_available():
+        return None
     try:
         data = await tracked_get(
             provider="binance",
@@ -46,11 +81,15 @@ async def _binance_price(pair: str) -> float | None:
             ttl=60,
         )
         return float(data["price"])
-    except Exception:
+    except Exception as exc:
+        if _is_geo_block(exc):
+            _mark_binance_blocked()
         return None
 
 
 async def _binance_depth(pair: str, limit: int = 20) -> dict | None:
+    if not _binance_available():
+        return None
     try:
         data = await tracked_get(
             provider="binance",
@@ -62,7 +101,9 @@ async def _binance_depth(pair: str, limit: int = 20) -> dict | None:
         bids = sum(float(p) * float(q) for p, q in data.get("bids", []))
         asks = sum(float(p) * float(q) for p, q in data.get("asks", []))
         return {"bid_depth_usd": bids, "ask_depth_usd": asks}
-    except Exception:
+    except Exception as exc:
+        if _is_geo_block(exc):
+            _mark_binance_blocked()
         return None
 
 
