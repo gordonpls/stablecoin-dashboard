@@ -42,6 +42,11 @@ logger = logging.getLogger(__name__)
 PRICE_REFRESH_SECS  = 600   # price/score pipeline cadence (10 minutes)
 SUPPLY_REFRESH_SECS = 3600  # supply + reserves cadence (1 hour)
 
+# Watchlist is hidden for now — the UX needs rethinking. Flip to True to restore
+# the ⭐ panel, the "Watchlist only" filter, and the sidebar editor (the backend
+# service + API endpoints stay intact in the meantime).
+WATCHLIST_ENABLED = False
+
 # Password gating any control that changes app behaviour (manual refresh,
 # watchlist edits). Overridable in production via the DASHBOARD_PASSWORD env var;
 # defaults to the historical value so existing deployments keep working.
@@ -1369,23 +1374,30 @@ def render_overview_tab(df: pd.DataFrame) -> None:
         _callout("No data yet. Run the ingestion pipelines first.", "info")
         return
 
-    watched = set(load_watchlist_symbols())
-    _render_watchlist_panel()
+    watched: set[str] = set()
+    if WATCHLIST_ENABLED:
+        watched = set(load_watchlist_symbols())
+        _render_watchlist_panel()
 
-    # Filters row
-    fc1, fc2, fc3 = st.columns([2, 1, 1])
+    # Filters row — the watchlist-only filter only appears when the feature is on.
+    if WATCHLIST_ENABLED:
+        fc1, fc2, fc3 = st.columns([2, 1, 1])
+    else:
+        fc1, fc2 = st.columns([2, 1])
     risk_filter = fc1.selectbox(
         "Filter by stability",
         ["All", "Strong", "Adequate", "Constrained", "Weak"],
         key="overview_risk_filter",
     )
     search = fc2.text_input("Search symbol", placeholder="e.g. USDT", key="overview_search")
-    watch_only = fc3.checkbox(
-        "⭐ Watchlist only",
-        key="overview_watch_only",
-        disabled=not watched,
-        help="Show only assets you have pinned in the sidebar watchlist.",
-    )
+    watch_only = False
+    if WATCHLIST_ENABLED:
+        watch_only = fc3.checkbox(
+            "⭐ Watchlist only",
+            key="overview_watch_only",
+            disabled=not watched,
+            help="Show only assets you have pinned in the sidebar watchlist.",
+        )
 
     filtered = df.copy()
     if risk_filter != "All":
@@ -3213,35 +3225,36 @@ def main() -> None:
         else:
             st.sidebar.error("Incorrect password")
 
-    # ── watchlist editor (password-gated) ───────────────────────────────────────
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("Watchlist")
-    st.sidebar.caption(
-        "Pin assets for quick monitoring. Pinned coins appear in a ⭐ panel and a "
-        "filter on the Overview tab. Editing is password-protected."
-    )
-    wl_options = load_all_symbols()
-    wl_current = load_watchlist_symbols()
-    wl_pick = st.sidebar.multiselect(
-        "Watched assets",
-        options=wl_options,
-        default=[s for s in wl_current if s in wl_options],
-        key="watchlist_select",
-    )
-    wl_pwd = st.sidebar.text_input("Password", type="password", key="watchlist_pwd")
-    if st.sidebar.button("Save watchlist", use_container_width=True):
-        if wl_pwd == DASHBOARD_PASSWORD:
-            from services.watchlist import set_watchlist
+    # ── watchlist editor (password-gated) — hidden while the feature is disabled ──
+    if WATCHLIST_ENABLED:
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("Watchlist")
+        st.sidebar.caption(
+            "Pin assets for quick monitoring. Pinned coins appear in a ⭐ panel and a "
+            "filter on the Overview tab. Editing is password-protected."
+        )
+        wl_options = load_all_symbols()
+        wl_current = load_watchlist_symbols()
+        wl_pick = st.sidebar.multiselect(
+            "Watched assets",
+            options=wl_options,
+            default=[s for s in wl_current if s in wl_options],
+            key="watchlist_select",
+        )
+        wl_pwd = st.sidebar.text_input("Password", type="password", key="watchlist_pwd")
+        if st.sidebar.button("Save watchlist", use_container_width=True):
+            if wl_pwd == DASHBOARD_PASSWORD:
+                from services.watchlist import set_watchlist
 
-            res = set_watchlist(wl_pick)
-            st.cache_data.clear()
-            msg = f"Watchlist saved (+{len(res['added'])} / -{len(res['removed'])})."
-            if res["skipped"]:
-                msg += f" Skipped unknown: {', '.join(res['skipped'])}."
-            st.sidebar.success(msg)
-            st.rerun()
-        else:
-            st.sidebar.error("Incorrect password")
+                res = set_watchlist(wl_pick)
+                st.cache_data.clear()
+                msg = f"Watchlist saved (+{len(res['added'])} / -{len(res['removed'])})."
+                if res["skipped"]:
+                    msg += f" Skipped unknown: {', '.join(res['skipped'])}."
+                st.sidebar.success(msg)
+                st.rerun()
+            else:
+                st.sidebar.error("Incorrect password")
 
     st.sidebar.markdown(
         "<p style='font-size:11px; color:rgba(100,100,100,0.8); margin-top:32px;'>"
