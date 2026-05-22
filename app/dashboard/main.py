@@ -121,6 +121,17 @@ REGIME_COLORS = {
     "High risk":            C_RED,
 }
 
+# Compact badge shown next to the symbol in the Overview table (replaces the
+# standalone Regime column). Calm → severe; data-quality concern is its own mark.
+REGIME_BADGES = {
+    "Stable":               "🟢",
+    "Mild stress":          "🟡",
+    "Data quality concern": "🔵",
+    "Liquidity stress":     "🟠",
+    "Peg stress":           "🟠",
+    "High risk":            "🔴",
+}
+
 SCORE_COLORS = [C_PRIMARY, C_GREEN, C_AMBER, "#ec4899"]
 SCORE_COLS   = ["peg_score", "liquidity_score", "reserve_score", "adoption_score"]
 SCORE_LABELS = ["Peg", "Liquidity", "Reserve", "Adoption"]
@@ -297,9 +308,13 @@ def load_overview() -> pd.DataFrame:
             "risk_label":        risk_label(score_row.overall_score),
             "regime":            regime_row["regime"] if regime_row else "—",
             "scored_at":         score_row.scored_at,
-            # Freshness reflects the age of the underlying live price data, not the
-            # scorer's clock. None when the asset has no price snapshot at all.
-            "data_freshness":    price_row.recorded_at if price_row else None,
+            # Freshness = age of the asset's most recent data point: the live price
+            # for actively-priced coins, otherwise the (newer-or-equal) supply
+            # snapshot. Every asset has supply data, so this is never None.
+            "data_freshness":    max(
+                supply_row.recorded_at,
+                price_row.recorded_at if price_row else supply_row.recorded_at,
+            ),
         })
 
     df = pd.DataFrame(rows)
@@ -568,6 +583,7 @@ PROVIDER_COSTS = pd.DataFrame([
     {"provider": "Binance",   "endpoint": "ticker_price",      "frequency": "1-5 min",  "cost_usd": 0.00},
     {"provider": "Binance",   "endpoint": "order_book_depth",  "frequency": "hourly",   "cost_usd": 0.00},
     {"provider": "Coinbase",  "endpoint": "spot_price",        "frequency": "fallback", "cost_usd": 0.00},
+    {"provider": "CoinGecko",  "endpoint": "simple_price",     "frequency": "fallback", "cost_usd": 0.00},
 ])
 
 
@@ -1286,9 +1302,16 @@ def render_profile_tab(df: pd.DataFrame) -> None:
         default = qp.upper() if qp else None
     index = symbols.index(default) if default in symbols else 0
 
-    symbol = st.selectbox("Select asset", symbols, index=index, key="profile_select")
+    # Only write ?symbol= when the user actively picks an asset, so the default
+    # (first asset) doesn't auto-pollute the URL on every page load.
+    def _on_profile_select() -> None:
+        st.query_params["symbol"] = st.session_state["profile_select"]
+
+    symbol = st.selectbox(
+        "Select asset", symbols, index=index,
+        key="profile_select", on_change=_on_profile_select,
+    )
     st.session_state["profile_symbol"] = symbol
-    st.query_params["symbol"] = symbol
 
     st.markdown("<div style='margin-top:8px;'></div>", unsafe_allow_html=True)
     render_profile(symbol)
@@ -1347,8 +1370,8 @@ def render_overview_tab(df: pd.DataFrame) -> None:
 | **Peg Deviation** | Distance from $1.00, in basis points. 1 bps = $0.0001. Healthy coins stay within 10 bps. |
 | **Risk Score** | Composite score 0–100. Higher = safer. Weighted across peg, liquidity, reserves, and adoption. |
 | **Risk Level** | Plain-English label: Low Risk (80+), Moderate (60–79), Elevated (40–59), High Risk (<40). |
-| **Regime** | Current condition in plain language: Stable, Mild stress, Peg stress, Liquidity stress, Data quality concern, or High risk. Derived from the score and peg, and tracked over time in the Risk Events tab. |
-| **Data Freshness** | How recently live price data was recorded for this asset. "—" means no live market data is available (most assets are supply-only). |
+| **Regime** | Current condition in plain language: Stable, Mild stress, Peg stress, Liquidity stress, Data quality concern, or High risk. The coloured dot next to each ticker is the same regime at a glance (🟢 Stable · 🟡 Mild stress · 🟠 Peg/Liquidity stress · 🔵 Data-quality concern · 🔴 High risk). Derived from the score and peg, and tracked over time in the Risk Events tab. |
+| **Data Freshness** | How recently this asset's data was updated — the live price for actively-priced coins, otherwise the latest supply snapshot. |
         """)
 
     if df.empty:
@@ -1390,6 +1413,11 @@ def render_overview_tab(df: pd.DataFrame) -> None:
         "overall_score", "risk_label", "regime", "data_freshness",
     ]].copy()
 
+    # Quick-scan regime badge next to the ticker; the Regime column shows the label.
+    display["symbol"] = [
+        f"{sym} {REGIME_BADGES.get(reg, '')}".strip()
+        for sym, reg in zip(filtered["symbol"], filtered["regime"])
+    ]
     display["market_cap"]    = display["market_cap"].apply(_fmt_supply)
     display["supply"]        = display["supply"].apply(_fmt_supply)
     display["change_7d"]     = display["change_7d"].apply(_fmt_pct)
@@ -1407,9 +1435,6 @@ def render_overview_tab(df: pd.DataFrame) -> None:
         "Risk Score", "Risk Level", "Regime", "Data Freshness",
     ]
 
-    # Leading star marks watched assets (read-only indicator; editing is gated).
-    display.insert(0, "★", ["⭐" if sym in watched else "" for sym in filtered["symbol"]])
-
     def _color_risk(val: str) -> str:
         c = RISK_COLORS.get(val, "")
         return f"color:{c}; font-weight:700;" if c else ""
@@ -1418,7 +1443,11 @@ def render_overview_tab(df: pd.DataFrame) -> None:
         c = REGIME_COLORS.get(val, "")
         return f"color:{c}; font-weight:700;" if c else ""
 
-    st.caption("Select a row to open that asset's full profile below.")
+    st.caption(
+        "Badge next to each symbol = risk regime: "
+        "🟢 Stable · 🟡 Mild stress · 🟠 Peg/Liquidity stress · "
+        "🔵 Data-quality concern · 🔴 High risk. Select a row to open that asset's full profile below."
+    )
     event = st.dataframe(
         display.style
             .map(_color_risk, subset=["Risk Level"])
@@ -2532,7 +2561,10 @@ def render_risk_events_tab(events: list[dict]) -> None:
         asset = st.selectbox("Asset", ["All"] + assets, key="re_asset")
     with c2:
         type_sel = st.multiselect(
-            "Event type", options=types_present, default=types_present,
+            "Event type", options=types_present,
+            # API failures are operational noise, not market risk — selectable but
+            # not shown by default.
+            default=[t for t in types_present if t != "API_FAILURE"],
             format_func=lambda t: EVENT_TYPE_LABELS.get(t, t), key="re_types",
         )
     with c3:
