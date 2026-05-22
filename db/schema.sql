@@ -110,6 +110,24 @@ CREATE INDEX IF NOT EXISTS idx_dq_warnings_active
 CREATE INDEX IF NOT EXISTS idx_dq_warnings_symbol
     ON data_quality_warnings(symbol, warning_type);
 
+CREATE TABLE IF NOT EXISTS provider_fallback_events (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol            TEXT NOT NULL,
+    data_type         TEXT NOT NULL,         -- currently always "price"
+    primary_provider  TEXT NOT NULL,         -- provider tried first, e.g. binance
+    fallback_provider TEXT,                  -- configured fallback, e.g. coinbase
+    source_provider   TEXT,                  -- provider that actually served the data; NULL if unavailable
+    source_type       TEXT NOT NULL,         -- fallback | unavailable
+    fallback_reason   TEXT,                  -- why the primary was skipped/failed
+    recorded_at       TIMESTAMP NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_fallback_events_time
+    ON provider_fallback_events(recorded_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_fallback_events_symbol_time
+    ON provider_fallback_events(symbol, recorded_at DESC);
+
 CREATE TABLE IF NOT EXISTS api_request_log (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     provider     TEXT NOT NULL,
@@ -139,3 +157,32 @@ CREATE INDEX IF NOT EXISTS idx_pipeline_runs_name_time
 
 CREATE INDEX IF NOT EXISTS idx_pipeline_runs_time
     ON pipeline_runs(started_at DESC);
+
+CREATE TABLE IF NOT EXISTS watchlist (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol    TEXT NOT NULL UNIQUE REFERENCES stablecoins(symbol),  -- one row per asset
+    note      TEXT,                                                 -- optional operator note
+    added_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS alerts (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol            TEXT NOT NULL REFERENCES stablecoins(symbol),
+    metric            TEXT NOT NULL,         -- peg_deviation_bps | price | liquidity_usd | overall_score | circulating_supply
+    comparator        TEXT NOT NULL,         -- above (value >= threshold) | below (value <= threshold)
+    threshold         REAL NOT NULL,
+    severity          TEXT NOT NULL DEFAULT 'medium',  -- low | medium | high
+    note              TEXT,
+    active            BOOLEAN NOT NULL DEFAULT 1,
+    created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_evaluated_at TIMESTAMP,             -- last time the scoring pipeline evaluated this rule
+    last_triggered_at TIMESTAMP,             -- last time the rule was in breach
+    last_value        REAL                   -- metric value at the last evaluation
+);
+
+CREATE INDEX IF NOT EXISTS idx_alerts_symbol
+    ON alerts(symbol);
+
+CREATE INDEX IF NOT EXISTS idx_alerts_active
+    ON alerts(active, created_at DESC);

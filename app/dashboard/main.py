@@ -5,6 +5,7 @@ Reads directly from SQLite. Run ingestion pipelines first to populate data.
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 import logging
@@ -29,6 +30,7 @@ from db.models import (
     ApiRequestLog,
     PriceSnapshot,
     RiskScore,
+    Stablecoin,
     SupplySnapshot,
     get_session,
     init_db,
@@ -39,6 +41,11 @@ logger = logging.getLogger(__name__)
 # Per CLAUDE.md: "1 to 5 minute refresh for peg prices", "daily refresh for slow data".
 PRICE_REFRESH_SECS  = 600   # price/score pipeline cadence (10 minutes)
 SUPPLY_REFRESH_SECS = 3600  # supply + reserves cadence (1 hour)
+
+# Password gating any control that changes app behaviour (manual refresh,
+# watchlist edits). Overridable in production via the DASHBOARD_PASSWORD env var;
+# defaults to the historical value so existing deployments keep working.
+DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "2026")
 
 # Process-level timestamps so the timer survives multiple browser sessions
 # without hammering the APIs on every new connection.
@@ -465,6 +472,15 @@ def load_chain_supply(symbol: str) -> dict | None:
     return get_chain_concentration(symbol)
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def load_dominance(window: str = "7d", limit: int = 50, movers_limit: int = 10) -> dict:
+    from services.dominance import compute_dominance, market_share_movers
+
+    result = compute_dominance(limit=limit)
+    result["movers"] = market_share_movers(window=window, limit=movers_limit)
+    return result
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def load_pipeline_runs(limit: int = 100) -> dict:
     from services.pipeline_runs import pipeline_status_summary, query_runs
@@ -483,6 +499,49 @@ def load_data_quality(limit: int = 200) -> dict:
         "summary": warning_summary(),
         "warnings": query_warnings(limit=limit),
     }
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def load_provider_fallback(window_hours: int = 24) -> dict:
+    from services.provider_fallback import get_fallback_status
+
+    return get_fallback_status(window_hours=window_hours)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def load_readiness() -> dict:
+    from services.readiness import get_readiness
+
+    return get_readiness()
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_watchlist() -> list[dict]:
+    from services.watchlist import get_watchlist
+
+    return get_watchlist()
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_alerts() -> list[dict]:
+    from services.alerts import list_alerts
+
+    return list_alerts()
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_watchlist_symbols() -> list[str]:
+    from services.watchlist import watchlist_symbols
+
+    return sorted(watchlist_symbols())
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_all_symbols() -> list[str]:
+    """All tracked stablecoin tickers — the candidate set for the watchlist editor."""
+    with get_session() as session:
+        rows = session.execute(select(Stablecoin.symbol)).scalars().all()
+    return sorted(rows)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -1016,11 +1075,22 @@ def render_profile(symbol: str) -> None:
         peg_accent = C_RED if bps > 50 else C_AMBER if bps > 10 else C_GREEN
     risk_accent = RISK_COLORS.get(risk, C_MUTED)
 
+    # Flag when the price came from the Coinbase fallback rather than Binance.
+    price_src = (price.get("source") or "").lower()
+    if price_val is None:
+        price_note = "No price snapshot yet."
+    elif price_src == "coinbase":
+        price_note = "Latest from Coinbase (fallback)."
+    elif price_src:
+        price_note = f"Latest from {price.get('source')}."
+    else:
+        price_note = "Latest live price."
+
     c1, c2, c3, c4 = st.columns(4, gap="medium")
     c1.markdown(_stat_card(
         "Price", f"${price_val:.4f}" if price_val is not None else "—",
-        f"Latest from {price.get('source', '—')}." if price_val is not None else "No price snapshot yet.",
-        C_BLUE,
+        price_note,
+        C_RED if price_src == "coinbase" else C_BLUE,
     ), unsafe_allow_html=True)
     c2.markdown(_stat_card(
         "Peg Deviation", f"{bps:.1f} bps" if bps is not None else "—",
@@ -1224,6 +1294,41 @@ def render_profile_tab(df: pd.DataFrame) -> None:
     render_profile(symbol)
 
 
+def _render_watchlist_panel() -> None:
+    """Compact panel of pinned assets at the top of the Overview tab.
+
+    Shows an empty-state hint when nothing is watched so the feature is
+    discoverable; editing happens in the password-gated sidebar editor.
+    """
+    wl = load_watchlist()
+    st.markdown("#### ⭐ Your Watchlist")
+    if not wl:
+        _callout(
+            "No assets pinned yet. Add some from the <b>Watchlist</b> editor in the "
+            "sidebar (password required) to keep your key coins in view.",
+            "info",
+        )
+        return
+
+    wl_df = pd.DataFrame(wl)
+    panel = pd.DataFrame({
+        "Symbol":        wl_df["symbol"],
+        "Name":          wl_df["name"].fillna("—"),
+        "Price":         wl_df["price"].apply(lambda v: f"${v:.4f}" if pd.notna(v) else "—"),
+        "Peg Deviation": wl_df["peg_deviation_bps"].apply(
+            lambda v: f"{v:.1f} bps" if pd.notna(v) else "—"
+        ),
+        "Supply":        wl_df["circulating_supply"].apply(_fmt_supply),
+        "Risk Score":    wl_df["overall_score"].apply(
+            lambda v: f"{v:.0f} / 100" if pd.notna(v) else "—"
+        ),
+        "Note":          wl_df["note"].fillna(""),
+    })
+    st.dataframe(panel, use_container_width=True, hide_index=True)
+    st.caption("Edit your watchlist from the sidebar (password required).")
+    st.divider()
+
+
 def render_overview_tab(df: pd.DataFrame) -> None:
     _section_header(
         "Market Overview",
@@ -1250,20 +1355,31 @@ def render_overview_tab(df: pd.DataFrame) -> None:
         _callout("No data yet. Run the ingestion pipelines first.", "info")
         return
 
+    watched = set(load_watchlist_symbols())
+    _render_watchlist_panel()
+
     # Filters row
-    fc1, fc2 = st.columns([2, 1])
+    fc1, fc2, fc3 = st.columns([2, 1, 1])
     risk_filter = fc1.selectbox(
         "Filter by risk level",
         ["All", "Low Risk", "Moderate", "Elevated", "High Risk"],
         key="overview_risk_filter",
     )
     search = fc2.text_input("Search symbol", placeholder="e.g. USDT", key="overview_search")
+    watch_only = fc3.checkbox(
+        "⭐ Watchlist only",
+        key="overview_watch_only",
+        disabled=not watched,
+        help="Show only assets you have pinned in the sidebar watchlist.",
+    )
 
     filtered = df.copy()
     if risk_filter != "All":
         filtered = filtered[filtered["risk_label"] == risk_filter]
     if search:
         filtered = filtered[filtered["symbol"].str.upper().str.contains(search.upper())]
+    if watch_only and watched:
+        filtered = filtered[filtered["symbol"].isin(watched)]
 
     st.caption(f"Showing {len(filtered)} of {len(df)} assets")
 
@@ -1290,6 +1406,9 @@ def render_overview_tab(df: pd.DataFrame) -> None:
         "Top Chain", "Peg Deviation",
         "Risk Score", "Risk Level", "Regime", "Data Freshness",
     ]
+
+    # Leading star marks watched assets (read-only indicator; editing is gated).
+    display.insert(0, "★", ["⭐" if sym in watched else "" for sym in filtered["symbol"]])
 
     def _color_risk(val: str) -> str:
         c = RISK_COLORS.get(val, "")
@@ -1336,6 +1455,149 @@ CONCENTRATION_COLORS = {
 # Share of supply on one chain that the dashboard flags as concentration risk —
 # mirrors services.chain_concentration.HIGH_CONCENTRATION_PCT.
 CHAIN_WARN_PCT = 75
+
+
+def render_market_dominance() -> None:
+    """Market share & competitive momentum: dominance chart, gainers/losers, table."""
+    _section_header(
+        "Market Dominance & Share",
+        "Stablecoins compete for the same job — being the dollar of crypto — so an asset's "
+        "share of total tracked supply, and whether that share is rising or falling, signals "
+        "competitive momentum that raw supply alone hides.",
+    )
+
+    with st.expander("How is market share measured?"):
+        st.markdown(
+            "**Market share** is an asset's circulating supply divided by the total supply of "
+            "all tracked stablecoins. **Dominance** is the share held by the single largest "
+            "asset.\n\n"
+            "**Share change** is the move in percentage points over the window. A coin can grow "
+            "its supply yet still *lose* share if the rest of the market grew faster.\n\n"
+            "Share change is only shown once there is at least half a window of history; until "
+            "then it reads `—` rather than guessing."
+        )
+
+    # View-only control: which window's share change to show (does not change how
+    # the app fetches data, so it needs no auth gate).
+    window = st.radio(
+        "Share-change window",
+        options=["7d", "30d"],
+        horizontal=True,
+        key="dominance_window",
+    )
+
+    data = load_dominance(window=window, limit=100, movers_limit=8)
+    rankings = data.get("rankings", [])
+    if not rankings:
+        _callout(
+            "No supply data yet. Run <code>python -m pipelines.update_supply</code>.",
+            "info",
+        )
+        return
+
+    change_key = f"market_share_change_{window}"
+
+    # ── headline metrics ──
+    k1, k2, k3 = st.columns(3)
+    k1.markdown(_stat_card(
+        "Total Tracked Supply", _fmt_supply(data["total_tracked_supply"]),
+        f"Combined circulating supply across {data['asset_count']} tracked stablecoins.",
+        C_BLUE,
+    ), unsafe_allow_html=True)
+    k2.markdown(_stat_card(
+        "Top Asset", data["top_asset"] or "—",
+        "The most dominant stablecoin by supply.",
+        C_PRIMARY,
+    ), unsafe_allow_html=True)
+    k3.markdown(_stat_card(
+        "Dominance", f"{data['top_asset_share']:.1f}%" if data["top_asset_share"] is not None else "—",
+        f"{data['top_asset']}'s share of total tracked supply.",
+        C_GREEN,
+    ), unsafe_allow_html=True)
+
+    st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
+
+    # ── dominance pie: top 10 + Other ──
+    top = rankings[:10]
+    other_share = sum(r["market_share"] for r in rankings[10:])
+    labels = [r["asset"] for r in top]
+    values = [r["market_share"] for r in top]
+    if other_share > 0:
+        labels.append("Other")
+        values.append(round(other_share, 2))
+    fig = go.Figure(go.Pie(
+        labels=labels,
+        values=values,
+        hole=0.55,
+        sort=False,
+        textinfo="label+percent",
+        hovertemplate="<b>%{label}</b><br>%{value:.2f}% of market<extra></extra>",
+        marker=dict(line=dict(color="rgba(0,0,0,0)", width=1)),
+    ))
+    fig.update_layout(**_chart_layout(
+        title="Market share of tracked stablecoin supply",
+        height=380,
+        showlegend=False,
+    ))
+    st.plotly_chart(fig, use_container_width=True)
+
+    # ── gainers / losers for the selected window ──
+    movers = data.get("movers", {})
+    gainers, losers = movers.get("gainers", []), movers.get("losers", [])
+    if not gainers and not losers:
+        _callout(
+            f"Share change over {window} will appear once there is at least half a window of "
+            "supply history.",
+            "info",
+        )
+    else:
+        st.markdown(f"#### Biggest share movers ({window})")
+        gc, lc = st.columns(2)
+        with gc:
+            st.markdown("**Gaining share**")
+            if gainers:
+                st.dataframe(
+                    pd.DataFrame([
+                        {"Symbol": m["asset"],
+                         "Share": f"{m['market_share']:.2f}%",
+                         "Change": f"+{m['market_share_change']:.2f} pp"}
+                        for m in gainers
+                    ]),
+                    use_container_width=True, hide_index=True,
+                )
+            else:
+                st.caption("No assets gained share this window.")
+        with lc:
+            st.markdown("**Losing share**")
+            if losers:
+                st.dataframe(
+                    pd.DataFrame([
+                        {"Symbol": m["asset"],
+                         "Share": f"{m['market_share']:.2f}%",
+                         "Change": f"{m['market_share_change']:.2f} pp"}
+                        for m in losers
+                    ]),
+                    use_container_width=True, hide_index=True,
+                )
+            else:
+                st.caption("No assets lost share this window.")
+
+    # ── full ranking table ──
+    def _fmt_change(v: float | None) -> str:
+        if v is None:
+            return "—"
+        return f"{'+' if v >= 0 else ''}{v:.2f} pp"
+
+    table = pd.DataFrame([
+        {
+            "Symbol":        r["asset"],
+            "Supply":        _fmt_supply(r["circulating_supply"]),
+            "Market Share":  f"{r['market_share']:.2f}%",
+            f"Δ Share ({window})": _fmt_change(r[change_key]),
+        }
+        for r in rankings
+    ])
+    st.dataframe(table, use_container_width=True, hide_index=True)
 
 
 def render_chain_concentration() -> None:
@@ -1535,6 +1797,9 @@ exploit, the stablecoin becomes temporarily unusable.
         st.plotly_chart(fig2, use_container_width=True)
     else:
         _callout("Supply history will appear after the pipeline has run on multiple days.", "info")
+
+    st.divider()
+    render_market_dominance()
 
     st.divider()
     render_chain_concentration()
@@ -1885,6 +2150,110 @@ def _age_from_iso(iso_ts: str | None) -> str:
     return _fmt_age((datetime.utcnow() - ts).total_seconds())
 
 
+# Per-check status → colour / label (mirrors services/readiness.py).
+CHECK_STATUS_COLORS = {"pass": C_GREEN, "warn": C_AMBER, "fail": C_RED}
+CHECK_STATUS_LABELS = {"pass": "Pass", "warn": "Warn", "fail": "Fail"}
+CHECK_LABELS = {
+    "database":      "Database",
+    "disk":          "Disk write",
+    "environment":   "Environment",
+    "configuration": "Configuration",
+    "pipelines":     "Pipelines",
+    "providers":     "Providers",
+}
+# Overall readiness verdict → colour / label / callout kind.
+READY_STATUS_COLORS = {"ready": C_GREEN, "degraded": C_AMBER, "not_ready": C_RED}
+READY_STATUS_LABELS = {"ready": "Ready", "degraded": "Degraded", "not_ready": "Not ready"}
+
+
+def render_readiness(report: dict) -> None:
+    _section_header(
+        "Deployment Readiness",
+        "Whether this instance is fit to serve traffic. Liveness (the app is "
+        "running) is separate from readiness (its dependencies are healthy). "
+        "Only database connectivity and missing required environment variables "
+        "block readiness; stale pipelines, a failing provider, a read-only disk, "
+        "or a production misconfiguration are shown as warnings.",
+    )
+
+    checks = report.get("checks", [])
+    overall = report.get("status", "degraded")
+    o_color = READY_STATUS_COLORS.get(overall, C_MUTED)
+    o_label = READY_STATUS_LABELS.get(overall, overall)
+
+    # Headline verdict + version.
+    version = report.get("version", "—")
+    st.markdown(
+        f"<div style='display:flex; align-items:center; gap:10px; margin-bottom:14px;'>"
+        f"<span style='width:11px;height:11px;border-radius:50%;background:{o_color};'></span>"
+        f"<span style='font-size:18px;font-weight:700;color:{o_color};'>{o_label}</span>"
+        f"<span style='color:{C_MUTED};font-size:13px;'>· v{version}</span>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    # Surface anything that fails or warns up front.
+    failures = [c for c in checks if c["status"] == "fail"]
+    warnings = [c for c in checks if c["status"] == "warn"]
+    if failures:
+        names = ", ".join(CHECK_LABELS.get(c["name"], c["name"]) for c in failures)
+        blocking = any(c["critical"] for c in failures)
+        _callout(
+            f"<strong>{names}</strong> failing — "
+            + ("this instance is <strong>not ready</strong> to serve traffic."
+               if blocking else "non-critical, traffic can still be served."),
+            "danger" if blocking else "warning",
+        )
+    elif warnings:
+        names = ", ".join(CHECK_LABELS.get(c["name"], c["name"]) for c in warnings)
+        _callout(
+            f"Running, but degraded: <strong>{names}</strong> "
+            f"{'has' if len(warnings) == 1 else 'have'} warnings. The app can "
+            "still serve data.",
+            "warning",
+        )
+
+    # Per-check status pills.
+    chips = []
+    for c in checks:
+        status = c["status"]
+        color = CHECK_STATUS_COLORS.get(status, C_MUTED)
+        status_txt = CHECK_STATUS_LABELS.get(status, status)
+        label = CHECK_LABELS.get(c["name"], c["name"])
+        chips.append(
+            f"<span style='display:inline-flex; align-items:center; gap:7px; "
+            f"padding:6px 12px; margin:0 8px 8px 0; border-radius:999px; "
+            f"border:1px solid rgba(128,128,128,0.18); font-size:12px;'>"
+            f"<span style='width:8px;height:8px;border-radius:50%;background:{color};'></span>"
+            f"<span style='color:{C_MUTED};'>{label}</span>"
+            f"<span style='font-weight:700;color:{color};'>{status_txt}</span>"
+            f"</span>"
+        )
+    st.markdown("<div style='margin-bottom:14px;'>" + "".join(chips) + "</div>", unsafe_allow_html=True)
+
+    table = pd.DataFrame([
+        {
+            "Check":    CHECK_LABELS.get(c["name"], c["name"]),
+            "Status":   CHECK_STATUS_LABELS.get(c["status"], c["status"]),
+            "Blocking": "Yes" if c["critical"] else "No",
+            "Detail":   c["detail"],
+        }
+        for c in checks
+    ])
+
+    def _color_check(val: str) -> str:
+        key = {v: k for k, v in CHECK_STATUS_LABELS.items()}.get(val)
+        c = CHECK_STATUS_COLORS.get(key, "")
+        return f"color:{c}; font-weight:700;" if c else ""
+
+    st.dataframe(
+        table.style.map(_color_check, subset=["Status"]),
+        use_container_width=True,
+        hide_index=True,
+    )
+    st.divider()
+
+
 def render_data_freshness(freshness: dict) -> None:
     _section_header(
         "Data Freshness",
@@ -1985,6 +2354,141 @@ def render_data_freshness(freshness: dict) -> None:
             use_container_width=True,
             hide_index=True,
         )
+
+    st.divider()
+
+
+# Primary-provider health → colour / label (mirrors get_fallback_status).
+FALLBACK_STATUS_COLORS = {
+    "healthy":  C_GREEN,
+    "degraded": C_AMBER,
+    "failing":  C_RED,
+    "unknown":  C_MUTED,
+}
+FALLBACK_STATUS_LABELS = {
+    "healthy":  "Healthy",
+    "degraded": "Degraded",
+    "failing":  "Failing",
+    "unknown":  "No data",
+}
+
+
+def render_provider_fallback(fallback: dict) -> None:
+    _section_header(
+        "Provider Fallback",
+        "Prices come from Binance first and fall back to Coinbase when Binance is "
+        "unavailable. This shows which provider is actually serving each asset, "
+        "how often the fallback was used, and whether the primary provider is "
+        "failing — so degraded or alternate data is never silent.",
+    )
+
+    summary = fallback.get("summary", {})
+    primary = fallback.get("primary_provider", "binance")
+    fallback_prov = fallback.get("fallback_provider", "coinbase")
+    window_h = fallback.get("window_hours", 24)
+    status = summary.get("primary_status", "unknown")
+
+    if summary.get("total_price_points", 0) == 0 and not fallback.get("recent_events"):
+        _callout(
+            "No price points recorded yet. Run the price pipeline first; fallback "
+            "usage will appear here once Binance and Coinbase have been queried.",
+            "info",
+        )
+        st.divider()
+        return
+
+    # Headline callout when the primary is degraded/failing or fallback is live.
+    if status == "failing":
+        _callout(
+            f"<strong>{primary.capitalize()} (primary) appears to be failing.</strong> "
+            f"{summary.get('primary_status_reason', '')}",
+            "danger",
+        )
+    elif status == "degraded" or summary.get("currently_on_fallback"):
+        on_fb = summary.get("assets_on_fallback") or []
+        extra = (
+            f" Currently serving {', '.join(on_fb)} from {fallback_prov} (fallback)."
+            if on_fb else ""
+        )
+        _callout(
+            f"<strong>Fallback data in use.</strong> "
+            f"{summary.get('primary_status_reason', '')}{extra}",
+            "warning",
+        )
+
+    # KPI strip.
+    status_color = FALLBACK_STATUS_COLORS.get(status, C_MUTED)
+    status_label = FALLBACK_STATUS_LABELS.get(status, status)
+    rate = summary.get("fallback_rate")
+    rate_txt = f"{rate:.1f}%" if rate is not None else "—"
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        st.markdown(
+            f"<div style='font-size:12px;color:{C_MUTED};'>Primary ({primary})</div>"
+            f"<div style='font-size:22px;font-weight:800;color:{status_color};'>{status_label}</div>",
+            unsafe_allow_html=True,
+        )
+    with k2:
+        st.markdown(
+            f"<div style='font-size:12px;color:{C_MUTED};'>Fallback rate ({window_h}h)</div>"
+            f"<div style='font-size:22px;font-weight:800;'>{rate_txt}</div>",
+            unsafe_allow_html=True,
+        )
+    with k3:
+        st.markdown(
+            f"<div style='font-size:12px;color:{C_MUTED};'>Fallback events ({window_h}h)</div>"
+            f"<div style='font-size:22px;font-weight:800;'>{summary.get('fallback_events', 0)}</div>",
+            unsafe_allow_html=True,
+        )
+    with k4:
+        st.markdown(
+            f"<div style='font-size:12px;color:{C_MUTED};'>Unavailable ({window_h}h)</div>"
+            f"<div style='font-size:22px;font-weight:800;'>{summary.get('unavailable_events', 0)}</div>",
+            unsafe_allow_html=True,
+        )
+
+    # Per-asset source table.
+    assets = fallback.get("assets", [])
+    if assets:
+        st.markdown("<div style='margin-top:16px;'></div>", unsafe_allow_html=True)
+        st.markdown("##### Current price source by asset")
+        asset_table = pd.DataFrame([
+            {
+                "Asset":         a["asset"],
+                "Current Source": (a.get("latest_source") or "—").capitalize(),
+                "On Fallback":   "Yes" if a.get("on_fallback") else "No",
+                "Primary Pts":   a.get("primary_points", 0),
+                "Fallback Pts":  a.get("fallback_points", 0),
+                "Last Fallback": _age_from_iso(a.get("last_fallback_at")),
+            }
+            for a in assets
+        ])
+
+        def _color_fb(val: str) -> str:
+            return f"color:{C_RED}; font-weight:700;" if val == "Yes" else f"color:{C_GREEN};"
+
+        st.dataframe(
+            asset_table.style.map(_color_fb, subset=["On Fallback"]),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    # Recent fallback events.
+    events = fallback.get("recent_events", [])
+    if events:
+        st.markdown("<div style='margin-top:14px;'></div>", unsafe_allow_html=True)
+        with st.expander(f"Recent fallback events ({len(events)})", expanded=False):
+            ev_table = pd.DataFrame([
+                {
+                    "When":     _fmt_event_time(e.get("recorded_at")),
+                    "Asset":    e.get("symbol"),
+                    "Outcome":  "Fallback" if e.get("source_type") == "fallback" else "Unavailable",
+                    "Served By": (e.get("source_provider") or "—").capitalize(),
+                    "Reason":   e.get("fallback_reason") or "",
+                }
+                for e in events
+            ])
+            st.dataframe(ev_table, use_container_width=True, hide_index=True)
 
     st.divider()
 
@@ -2282,8 +2786,226 @@ def render_data_quality(data: dict) -> None:
     st.divider()
 
 
+ALERT_STATUS_COLORS = {
+    "triggered": C_RED,
+    "ok":        C_GREEN,
+    "no_data":   C_MUTED,
+    "paused":    C_MUTED,
+}
+
+ALERT_STATUS_LABELS = {
+    "triggered": "Triggered",
+    "ok":        "OK",
+    "no_data":   "No data",
+    "paused":    "Paused",
+}
+
+
+def _fmt_alert_value(metric: str | None, value: float | None) -> str:
+    """Format a metric value for the alerts table, matching the metric's unit."""
+    if value is None:
+        return "—"
+    if metric == "peg_deviation_bps":
+        return f"{value:.0f} bps"
+    if metric == "price":
+        return f"${value:.4f}"
+    if metric == "overall_score":
+        return f"{value:.0f}"
+    if metric in ("liquidity_usd", "circulating_supply"):
+        return f"${value:,.0f}"
+    return f"{value:g}"
+
+
+def _render_alert_editor(alerts: list[dict]) -> None:
+    """Password-gated create / enable-disable / delete controls for alert rules."""
+    from services.alerts import (
+        COMPARATORS,
+        SEVERITIES,
+        SUPPORTED_METRICS,
+        create_alert,
+        delete_alert,
+        update_alert,
+    )
+
+    with st.expander("Manage alerts (password required)"):
+        st.caption(
+            "Create a threshold rule, pause/resume it, or delete it. Editing is "
+            "password-protected — anonymous changes to monitoring rules are not allowed."
+        )
+        symbols = load_all_symbols()
+        if not symbols:
+            _callout("No tracked assets to alert on yet — ingest data first.", "info")
+            return
+
+        def cmp_label(c: str) -> str:
+            return "≥ at or above" if c == "above" else "≤ at or below"
+
+        st.markdown("**Create a new alert**")
+        c1, c2 = st.columns(2)
+        sym = c1.selectbox("Asset", options=symbols, key="alert_new_sym")
+        metric = c2.selectbox(
+            "Metric", options=list(SUPPORTED_METRICS),
+            format_func=lambda m: SUPPORTED_METRICS[m]["label"], key="alert_new_metric",
+        )
+        c3, c4, c5 = st.columns(3)
+        comparator = c3.selectbox(
+            "Condition", options=list(COMPARATORS),
+            format_func=cmp_label, key="alert_new_cmp",
+        )
+        threshold = c4.number_input("Threshold", value=50.0, step=1.0, key="alert_new_thr")
+        severity = c5.selectbox(
+            "Severity", options=list(SEVERITIES), index=1,
+            format_func=str.capitalize, key="alert_new_sev",
+        )
+        note = st.text_input("Note (optional)", key="alert_new_note")
+        unit = SUPPORTED_METRICS[metric]["unit"]
+        st.caption(
+            f"Fires when {SUPPORTED_METRICS[metric]['label']} is "
+            f"{cmp_label(comparator)} {threshold:g} ({unit})."
+        )
+        new_pwd = st.text_input("Password", type="password", key="alert_new_pwd")
+        if st.button("Create alert", use_container_width=True, key="alert_new_btn"):
+            if new_pwd != DASHBOARD_PASSWORD:
+                st.error("Incorrect or missing password.")
+            else:
+                try:
+                    created = create_alert(
+                        symbol=sym, metric=metric, threshold=float(threshold),
+                        comparator=comparator, severity=severity, note=note or None,
+                    )
+                except ValueError as exc:
+                    st.error(str(exc))
+                else:
+                    if created is None:
+                        st.error(f"{sym} is not a tracked stablecoin.")
+                    else:
+                        st.cache_data.clear()
+                        st.success(f"Alert created: {created['symbol']} {created['condition']}.")
+                        st.rerun()
+
+        if alerts:
+            st.markdown("---")
+            st.markdown("**Edit an existing alert**")
+            labels = {
+                a["id"]: f"#{a['id']} — {a['symbol']} {a['condition']} "
+                         f"({a['severity']}{'' if a['active'] else ', paused'})"
+                for a in alerts
+            }
+            chosen = st.selectbox(
+                "Select alert", options=list(labels),
+                format_func=lambda i: labels[i], key="alert_edit_sel",
+            )
+            target = next(a for a in alerts if a["id"] == chosen)
+            edit_pwd = st.text_input("Password", type="password", key="alert_edit_pwd")
+            b1, b2 = st.columns(2)
+            toggle_label = "Pause" if target["active"] else "Resume"
+            if b1.button(toggle_label, use_container_width=True, key="alert_toggle_btn"):
+                if edit_pwd != DASHBOARD_PASSWORD:
+                    st.error("Incorrect or missing password.")
+                else:
+                    update_alert(chosen, active=not target["active"])
+                    st.cache_data.clear()
+                    st.rerun()
+            if b2.button("Delete", use_container_width=True, key="alert_delete_btn"):
+                if edit_pwd != DASHBOARD_PASSWORD:
+                    st.error("Incorrect or missing password.")
+                else:
+                    delete_alert(chosen)
+                    st.cache_data.clear()
+                    st.rerun()
+
+
+def render_alerts_tab(alerts: list[dict]) -> None:
+    _section_header(
+        "Alerts",
+        "User-defined threshold rules on a single metric for one asset — e.g. "
+        "“USDT peg deviation ≥ 50 bps” or “USDC risk score ≤ 70”. Each rule is "
+        "evaluated against the latest data; rules currently in breach are flagged "
+        "below. Editing is password-protected.",
+    )
+
+    triggered = [a for a in alerts if a.get("triggered")]
+    active = [a for a in alerts if a.get("active")]
+
+    if not alerts:
+        _callout(
+            "No alert rules yet. Add one from the “Manage alerts” editor below "
+            "(password required) to be notified when a metric crosses a threshold.",
+            "info",
+        )
+    elif triggered:
+        sev_counts = {"high": 0, "medium": 0, "low": 0}
+        for a in triggered:
+            sev_counts[a.get("severity", "low")] = sev_counts.get(a.get("severity", "low"), 0) + 1
+        kind = "danger" if sev_counts["high"] else "warning"
+        parts = [f"{n} {label}" for label, n in
+                 (("high", sev_counts["high"]), ("medium", sev_counts["medium"]),
+                  ("low", sev_counts["low"])) if n]
+        breakdown = f" ({', '.join(parts)})" if parts else ""
+        noun = "rule" if len(triggered) == 1 else "rules"
+        _callout(
+            f"<strong>{len(triggered)} alert {noun} currently triggered</strong>{breakdown}. "
+            "See the highlighted rows below.",
+            kind,
+        )
+    else:
+        n = len(active)
+        _callout(
+            f"All {n} active alert rule{'' if n == 1 else 's'} are within their "
+            "thresholds. Nothing is currently triggered.",
+            "info",
+        )
+
+    if alerts:
+        sev_rank = {"high": 0, "medium": 1, "low": 2}
+        # Triggered first, then by severity, then newest.
+        ordered = sorted(
+            alerts,
+            key=lambda a: (not a.get("triggered"), sev_rank.get(a.get("severity"), 9)),
+        )
+        table = pd.DataFrame([
+            {
+                "Status":   ALERT_STATUS_LABELS.get(a.get("status"), a.get("status", "")),
+                "Severity": a.get("severity", "").capitalize(),
+                "Asset":    a.get("symbol", ""),
+                "Condition": a.get("condition", ""),
+                "Current":  _fmt_alert_value(a.get("metric"), a.get("current_value")),
+                "Active":   "Yes" if a.get("active") else "No",
+                "Last fired": (_fmt_event_time(a["last_triggered_at"])
+                               if a.get("last_triggered_at") else "—"),
+                "Note":     a.get("note") or "",
+            }
+            for a in ordered
+        ])
+
+        def _color_status(val: str) -> str:
+            key = {v: k for k, v in ALERT_STATUS_LABELS.items()}.get(val)
+            c = ALERT_STATUS_COLORS.get(key, "")
+            weight = "700" if key == "triggered" else "600"
+            return f"color:{c}; font-weight:{weight};" if c else ""
+
+        def _color_sev(val: str) -> str:
+            c = SEVERITY_COLORS.get(val.lower(), "")
+            return f"color:{c}; font-weight:700;" if c else ""
+
+        st.dataframe(
+            table.style
+                .map(_color_status, subset=["Status"])
+                .map(_color_sev, subset=["Severity"]),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    _render_alert_editor(alerts)
+    st.divider()
+
+
 def render_api_tab() -> None:
+    render_readiness(load_readiness())
+
     render_data_freshness(load_data_freshness())
+
+    render_provider_fallback(load_provider_fallback())
 
     render_pipeline_runs(load_pipeline_runs())
 
@@ -2357,13 +3079,14 @@ def main() -> None:
     render_header(overview_df)
     _safe(lambda: render_market_changes(load_market_changes()), where="Market Changes")
 
-    tab_overview, tab_profile, tab_supply, tab_peg, tab_risk, tab_events, tab_api = st.tabs([
+    tab_overview, tab_profile, tab_supply, tab_peg, tab_risk, tab_events, tab_alerts, tab_api = st.tabs([
         "Overview",
         "Asset Profile",
         "Supply",
         "Peg Deviation",
         "Risk Scores",
         "Risk Events",
+        "Alerts",
         "API Usage",
     ])
 
@@ -2379,6 +3102,8 @@ def main() -> None:
         _safe(render_risk_tab, scores_df, where="Risk Scores")
     with tab_events:
         _safe(lambda: render_risk_events_tab(load_risk_events()), where="Risk Events")
+    with tab_alerts:
+        _safe(lambda: render_alerts_tab(load_alerts()), where="Alerts")
     with tab_api:
         _safe(render_api_tab, where="API Usage")
 
@@ -2435,7 +3160,7 @@ def main() -> None:
     st.sidebar.subheader("Manual Refresh")
     pwd = st.sidebar.text_input("Password", type="password", key="refresh_pwd")
     if st.sidebar.button("Refresh Data", use_container_width=True):
-        if pwd == "2026":
+        if pwd == DASHBOARD_PASSWORD:
             import core.cache as _api_cache
             import pipelines.update_supply   as _supply
             import pipelines.update_prices   as _prices
@@ -2462,6 +3187,36 @@ def main() -> None:
             if all_ok:
                 st.cache_data.clear()
                 st.rerun()
+        else:
+            st.sidebar.error("Incorrect password")
+
+    # ── watchlist editor (password-gated) ───────────────────────────────────────
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Watchlist")
+    st.sidebar.caption(
+        "Pin assets for quick monitoring. Pinned coins appear in a ⭐ panel and a "
+        "filter on the Overview tab. Editing is password-protected."
+    )
+    wl_options = load_all_symbols()
+    wl_current = load_watchlist_symbols()
+    wl_pick = st.sidebar.multiselect(
+        "Watched assets",
+        options=wl_options,
+        default=[s for s in wl_current if s in wl_options],
+        key="watchlist_select",
+    )
+    wl_pwd = st.sidebar.text_input("Password", type="password", key="watchlist_pwd")
+    if st.sidebar.button("Save watchlist", use_container_width=True):
+        if wl_pwd == DASHBOARD_PASSWORD:
+            from services.watchlist import set_watchlist
+
+            res = set_watchlist(wl_pick)
+            st.cache_data.clear()
+            msg = f"Watchlist saved (+{len(res['added'])} / -{len(res['removed'])})."
+            if res["skipped"]:
+                msg += f" Skipped unknown: {', '.join(res['skipped'])}."
+            st.sidebar.success(msg)
+            st.rerun()
         else:
             st.sidebar.error("Incorrect password")
 

@@ -639,7 +639,34 @@ Where:
 
 ---
 
-## 9. Add Stablecoin Dominance and Market Share
+## 9. Add Stablecoin Dominance and Market Share  (DONE 2026-05-22)
+
+Implemented in `services/dominance.py`. `compute_dominance()` reads
+`supply_snapshots` (no schema/pipeline change, consistent with the #7/#8
+read-time approach), collapses ticker-collision rows to the dominant value, and
+returns total tracked supply, asset count, the dominant asset + its share, and a
+`rankings` list (market share desc) where each asset carries 7d and 30d
+market-share-ago + share-change in percentage points. A window's "share N days
+ago" is only computed from a snapshot at least half the window old (otherwise
+`None` — insufficient history), and the past-share denominator sums only assets
+with sufficiently-old history so a newly-tracked coin is not credited a phantom
+swing. `market_share_movers(window)` derives gainers/losers from the same
+rankings. Exposed via `GET /stablecoins/rankings?window=7d|30d` (registered
+before `/stablecoins/{symbol}` so it isn't shadowed; bundles `rankings` +
+`movers`) and surfaced as a "Market Dominance & Share" section in the Supply tab:
+headline dominance KPIs, a market-share donut (top 10 + Other), a gainers/losers
+split for the selected window, and a full ranking table. Tests in
+`tests/test_dominance.py`.
+
+Remaining / follow-ups:
+- Share history over time (a dominance-over-time stacked area) would need either
+  storing computed shares or recomputing per historical snapshot; the current
+  view is point-in-time + window deltas.
+- The market-share denominator is *tracked* supply, not the whole stablecoin
+  market — fine for relative momentum, but note it in the UI if more assets are
+  added later.
+- Per-asset dominance (current share + 7d/30d change) could be wired into the
+  Asset Profile page's supply section, reusing `compute_dominance`.
 
 ### Objective
 
@@ -673,7 +700,7 @@ Users can see market structure changes and competitive momentum.
 
 ---
 
-## 10. Add More Backend Endpoints
+## 10. Add More Backend Endpoints  (PARTIALLY DONE)
 
 ### Objective
 
@@ -682,21 +709,70 @@ Add API routes that support the new user-facing features.
 ### Required Endpoints
 
 ```text
-GET /stablecoins/{symbol}/supply
-GET /stablecoins/{symbol}/liquidity
-GET /stablecoins/{symbol}/chain-supply
-GET /stablecoins/{symbol}/events
-GET /stablecoins/changes
-GET /stablecoins/rankings
-GET /alerts
-POST /alerts
-PATCH /alerts/{id}
-DELETE /alerts/{id}
-GET /watchlist
-POST /watchlist
-GET /risk-events
-GET /data-freshness
+GET /stablecoins/{symbol}/supply     DONE 2026-05-22 (services/supply.py)
+GET /stablecoins/{symbol}/liquidity  DONE (#7)
+GET /stablecoins/{symbol}/chain-supply DONE (#8)
+GET /stablecoins/{symbol}/events     DONE (#4)
+GET /stablecoins/changes             DONE (#1)
+GET /stablecoins/rankings            DONE (#9)
+GET /alerts                          TODO (stateful write feature — see note)
+POST /alerts                         TODO
+PATCH /alerts/{id}                   TODO
+DELETE /alerts/{id}                  TODO
+GET /watchlist                       DONE 2026-05-22 (services/watchlist.py)
+POST /watchlist                      DONE 2026-05-22
+DELETE /watchlist/{symbol}           DONE 2026-05-22
+GET /risk-events                     DONE (#4)
+GET /data-freshness                  DONE (#3)
 ```
+
+The **watchlist** iteration is now done (see below). The only remaining write
+feature is the **alerts** CRUD set. Alerts are a stateful *write* feature: a new
+table (`alerts`), a service layer, and — crucially — a **password-protected** UI,
+because anonymous write controls that change app behaviour are not allowed (see
+memory: `feedback_dashboard_controls`; reuse the `DASHBOARD_PASSWORD` gate the
+watchlist editor and manual refresh already share). Alerts also need an
+*evaluation* step (check each active rule against the latest snapshot and surface
+triggered alerts), which overlaps `services/risk_events.py` — design alerts as
+user-defined thresholds that reuse the same comparison primitives rather than a
+parallel detector. Implement alerts end-to-end (model + service + endpoints +
+gated UI + tests) in a single iteration so it does not land half-finished.
+
+### Watchlist (DONE 2026-05-22)
+
+`watchlist` table (`WatchlistItem` model + `db/schema.sql`, one row per symbol,
+unique) + `services/watchlist.py`. `add_to_watchlist`/`remove_from_watchlist`
+normalise the symbol and only accept assets present in `stablecoins` (unknown
+symbols are rejected, never invented); `add` is idempotent and updates the note.
+`set_watchlist` syncs the list to a desired set (used by the dashboard
+multiselect, skips unknowns). `get_watchlist` returns watched assets newest-first
+enriched with latest price / peg deviation / supply / overall score (null where
+absent). Exposed via `GET /watchlist`, `POST /watchlist` (404 on unknown symbol),
+`DELETE /watchlist/{symbol}` (404 when not watched). Surfaced as a ⭐ Watchlist
+panel atop the Overview tab, a ⭐ marker column + "Watchlist only" filter on the
+overview table, and a **password-gated** multiselect editor in the sidebar.
+Tests in `tests/test_watchlist.py`.
+
+Follow-ups:
+- The watchlist is a single global list (no per-user auth); revisit if/when an
+  auth/user model is added so each user gets their own.
+- The ⭐ marker / watchlist filter could be mirrored on the Asset Profile and in
+  other comparison tables (Risk Scores, Supply) for consistency.
+- A `note` is only editable via the API today; the sidebar editor manages
+  membership only. Add note editing to the gated UI if useful.
+
+### Supply endpoint shape (DONE)
+
+`GET /stablecoins/{symbol}/supply?history_days=&history_limit=` →
+`services.supply.get_supply_detail`: latest supply + chain breakdown, 7d/30d
+supply change (null on insufficient history), and a deduped supply time series.
+404 only for a completely unknown symbol; a known asset with no supply data
+returns null sections. Reuses the canonical `services.profile._parse_chains`
+parser and the same ticker-collision / insufficient-history guards as
+`services/dominance.py`. Tests in `tests/test_supply.py`. Not yet surfaced in the
+dashboard (the Supply tab and Asset Profile already chart supply via other
+services); wire `/supply` in if a single source for per-asset supply history is
+wanted.
 
 ### Acceptance Criteria
 
@@ -706,7 +782,37 @@ GET /data-freshness
 
 ---
 
-## 11. Add Deployment Readiness Checks
+## 11. Add Deployment Readiness Checks  (DONE 2026-05-22)
+
+Implemented in `services/readiness.py`. `get_readiness()` runs six checks —
+`database` (connectivity via `SELECT 1`), `disk` (writability of the directory
+backing the SQLite file), `environment` (operator-declared required vars via the
+opt-in `REQUIRED_ENV_VARS` allowlist), `configuration` (production-only warnings:
+SQLite in prod, DB under the temp dir, app running from the temp dir),
+`pipelines` (reuses `pipeline_status_summary` for latest success / failing
+pipelines), and `providers` (reuses `compute_data_freshness` provider health) —
+and rolls them into a verdict. Only **database connectivity** and **missing
+required env vars** are critical (block readiness); everything else is a
+non-blocking warning. `GET /health` is now liveness + diagnostics (always 200,
+carries the full `checks` block plus `ready`/`readiness_status`/`version`) while
+the new `GET /ready` returns **503 when not ready** so an orchestrator can gate
+traffic. App version is read from installed package metadata (falls back to
+`0.1.0`). Surfaced as a "Deployment Readiness" panel at the top of the API Usage
+tab (verdict + version, failing/degraded callout, per-check status pills, detail
+table). Tests in `tests/test_readiness.py`; existing `/health` test updated for
+the expanded contract.
+
+Remaining / follow-ups:
+- "Startup checks for required env vars" are evaluated lazily per request via the
+  `environment` check rather than crashing the process at boot — deliberately, so
+  a misconfiguration is *visible* (and shows in `/health`) instead of taking the
+  app down before it can report why. A hard startup gate could be added as a
+  FastAPI/Streamlit startup hook that calls `check_environment()` and refuses to
+  start on a critical fail, if fail-fast is preferred over fail-visible.
+- The production-misconfig signal overlaps the "SQLite fallback to /tmp" logic in
+  `db/models._default_db_url`; consider having that fallback emit a one-off
+  `risk_events`/log entry so an ephemeral-DB deployment is recorded, not just
+  surfaced on read.
 
 ### Objective
 
@@ -882,7 +988,41 @@ CREATE TABLE data_quality_warnings (
 
 ---
 
-## 14. Add Provider Fallback Status
+## 14. Add Provider Fallback Status  (DONE 2026-05-22)
+
+Implemented in `services/provider_fallback.py`, fixing a real bug along the way:
+`pipelines/update_prices.py` hard-coded `source="binance"` on every price
+snapshot even when ingestion had actually fallen back to Coinbase, so fallback
+usage was invisible. `ingestion/exchanges.get_peg_prices` now returns per-symbol
+provenance (`price_source`, `source_type` primary/fallback/unavailable,
+`fallback_used`, `fallback_reason`); the price pipeline stores the real
+`price_source` and calls `record_fallback_events()` (best-effort, idempotent on
+`(symbol, data_type, source_type, recorded_at)`) which logs a row to the new
+`provider_fallback_events` table only for the *exceptional* outcomes (a fallback
+served the price, or no price was available — never the normal primary path,
+keeping the table compact like `risk_events`). `get_fallback_status(window_hours)`
+derives the healthy primary-vs-fallback *rate* and each asset's current source
+from `price_snapshots.source` (excluding the liquidity pipeline's
+`exchanges_depth` rows), pulls the *reason* from the event table, and grades the
+primary provider `healthy`/`degraded`/`failing`/`unknown` (failing on ≥50%
+fallback rate in-window or any unavailable price). Exposed via
+`GET /provider-fallback?window_hours=&recent_limit=` and surfaced as a "Provider
+Fallback" panel in the API Usage tab (primary-health KPI strip, degraded/failing
+callout, per-asset current-source table with an On-Fallback badge, recent-events
+expander) plus a Coinbase-fallback flag on the Asset Profile price card. Tests in
+`tests/test_provider_fallback.py`.
+
+Remaining / follow-ups:
+- The liquidity pipeline (`update_liquidity`) queries Binance depth only and
+  still writes a generic `source="exchanges_depth"`; depth has no fallback
+  provider, so a Binance depth outage is silently absent rather than recorded as
+  an availability event. Consider logging a `data_type="depth"` unavailable
+  event there too.
+- The "primary repeatedly fails" signal here overlaps the `API_FAILURE`
+  risk event (#4) and the `failing` provider pill in `services/freshness.py`;
+  consider having one of them cite the others so the three don't drift.
+- Surface the per-asset On-Fallback badge in the Overview table (currently only
+  the Asset Profile + API Usage tab show it).
 
 ### Objective
 
@@ -1086,11 +1226,11 @@ These are the highest-value next tasks for an AI coding agent:
 3. ~~Add metric-level freshness and confidence indicators.~~ (DONE 2026-05-21 — `/data-freshness` + Data Freshness panel)
 4. ~~Add `pipeline_runs` table and job run history UI.~~ (DONE 2026-05-21 — `/pipeline-runs` + Pipeline Runs panel)
 5. ~~Add data validation warnings.~~ (DONE 2026-05-21 — `/data-quality` + Data Quality panel)
-6. Add provider fallback status visibility.
+6. ~~Add provider fallback status visibility.~~ (DONE 2026-05-22 — `services/provider_fallback.py`, `provider_fallback_events` table, `/provider-fallback`, API-Usage "Provider Fallback" panel; also fixed the hard-coded `source="binance"` bug in `update_prices`)
 7. ~~Add explainable score drilldowns.~~ (DONE 2026-05-21 — `/stablecoins/{symbol}/score-explanation` + Risk Scores / Profile drilldown)
 8. ~~Add risk events timeline.~~ (DONE 2026-05-21)
 9. ~~Add chain concentration risk.~~ (DONE 2026-05-21 — `services/chain_concentration.py`, `/stablecoins/{symbol}/chain-supply` + `/stablecoins/chain-concentration`, Supply-tab heatmap + table)
-10. Add stablecoin dominance and market share.
+10. ~~Add stablecoin dominance and market share.~~ (DONE 2026-05-22 — `services/dominance.py`, `/stablecoins/rankings`, Supply-tab Market Dominance section)
 
 ---
 

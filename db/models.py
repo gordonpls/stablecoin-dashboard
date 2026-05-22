@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Generator
 
-from sqlalchemy import create_engine, event, Column, String, Float, Integer, Text, DateTime, Date
+from sqlalchemy import create_engine, event, Column, String, Float, Integer, Text, DateTime, Date, Boolean
 from sqlalchemy.orm import DeclarativeBase, Session
 from sqlalchemy.pool import NullPool
 
@@ -221,6 +221,40 @@ class DataQualityWarning(Base):
         return {c.key: getattr(self, c.key) for c in self.__table__.columns}
 
 
+class ProviderFallbackEvent(Base):
+    """One occasion where a price was served by a fallback provider, or not at all.
+
+    Price ingestion tries the primary exchange (Binance) first and falls back to
+    Coinbase when the primary is unavailable. That fallback used to vanish into a
+    log line while ``price_snapshots.source`` was hard-coded to ``binance``, so
+    fallback usage was invisible. These rows make it auditable: one is written
+    each run only for the *exceptional* outcomes — a symbol served by a fallback
+    provider (``source_type = "fallback"``) or with no price available at all
+    (``source_type = "unavailable"``) — never for the normal primary path, so the
+    table stays compact like ``risk_events`` / ``data_quality_warnings``.
+
+    Rows de-duplicate on (symbol, data_type, source_type, recorded_at) so
+    re-recording the same run is a no-op. The healthy primary-vs-fallback *rate*
+    is derived separately from ``price_snapshots.source``; this table carries the
+    reason the primary was skipped, which a snapshot cannot.
+    """
+
+    __tablename__ = "provider_fallback_events"
+
+    id                = Column(Integer, primary_key=True, autoincrement=True)
+    symbol            = Column(String, nullable=False)
+    data_type         = Column(String, nullable=False)   # currently always "price"
+    primary_provider  = Column(String, nullable=False)   # provider tried first, e.g. "binance"
+    fallback_provider = Column(String)                   # configured fallback, e.g. "coinbase"
+    source_provider   = Column(String)                   # provider that served the data; null if unavailable
+    source_type       = Column(String, nullable=False)   # fallback | unavailable
+    fallback_reason   = Column(Text)                     # why the primary was skipped/failed
+    recorded_at       = Column(DateTime, nullable=False)
+
+    def to_dict(self) -> dict:
+        return {c.key: getattr(self, c.key) for c in self.__table__.columns}
+
+
 class ApiRequestLog(Base):
     __tablename__ = "api_request_log"
 
@@ -254,6 +288,69 @@ class PipelineRun(Base):
     rows_written     = Column(Integer, default=0)
     error_message    = Column(Text)
     duration_seconds = Column(Float)
+
+    def to_dict(self) -> dict:
+        return {c.key: getattr(self, c.key) for c in self.__table__.columns}
+
+
+class WatchlistItem(Base):
+    """A stablecoin the operator has pinned to their watchlist.
+
+    A focus list for day-to-day monitoring: the dashboard surfaces watched
+    assets in a dedicated panel and offers a watchlist-only view of the overview
+    table. There is no per-user auth, so the watchlist is a single global list
+    for the deployment, and edits are gated behind the dashboard password
+    (anonymous controls that change app behaviour are not allowed). ``symbol`` is
+    unique — adding an already-watched symbol updates its note instead of
+    inserting a duplicate row.
+    """
+
+    __tablename__ = "watchlist"
+
+    id       = Column(Integer, primary_key=True, autoincrement=True)
+    symbol   = Column(String, nullable=False, unique=True)
+    note     = Column(Text)
+    added_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    def to_dict(self) -> dict:
+        return {c.key: getattr(self, c.key) for c in self.__table__.columns}
+
+
+class Alert(Base):
+    """A user-defined threshold rule on one metric for one asset.
+
+    Distinct from ``RiskEvent`` (auto-detected step changes) and
+    ``DataQualityWarning`` (data-integrity problems): an alert is an *explicit,
+    persistent rule the operator created* — e.g. "USDT peg deviation at or above
+    50 bps" or "USDC overall risk score at or below 70". Each rule names a
+    ``metric``, a ``comparator`` ("above" → value ≥ threshold, "below" → value ≤
+    threshold), and a ``threshold``. ``services.alerts`` evaluates rules against
+    the latest stored snapshot using the same latest-value primitives as
+    ``services.risk_events``, so an alert and the risk-event timeline can never
+    read a metric differently.
+
+    Editing is gated behind the dashboard password (anonymous controls that
+    change app behaviour are not allowed). ``active`` lets a rule be paused
+    without deleting it; ``last_triggered_at`` / ``last_value`` /
+    ``last_evaluated_at`` record the most recent pipeline evaluation so the UI
+    can show when a rule last fired.
+    """
+
+    __tablename__ = "alerts"
+
+    id                = Column(Integer, primary_key=True, autoincrement=True)
+    symbol            = Column(String, nullable=False)
+    metric            = Column(String, nullable=False)   # peg_deviation_bps | price | liquidity_usd | overall_score | circulating_supply
+    comparator        = Column(String, nullable=False)   # above | below
+    threshold         = Column(Float, nullable=False)
+    severity          = Column(String, nullable=False, default="medium")  # low | medium | high
+    note              = Column(Text)
+    active            = Column(Boolean, nullable=False, default=True)
+    created_at        = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at        = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    last_evaluated_at = Column(DateTime)
+    last_triggered_at = Column(DateTime)
+    last_value        = Column(Float)
 
     def to_dict(self) -> dict:
         return {c.key: getattr(self, c.key) for c in self.__table__.columns}

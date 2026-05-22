@@ -161,6 +161,17 @@ def _run_scoring(rec) -> None:
     except Exception as exc:  # noqa: BLE001 - validation is non-critical
         logger.warning("data_validation_failed error=%s", exc)
 
+    # Evaluate user-defined alert rules against the freshly-scored data so the
+    # dashboard's triggered / last-fired state stays current. Best-effort: an
+    # evaluation bug must never fail the scoring run itself.
+    try:
+        from services.alerts import evaluate_alerts
+
+        fired = evaluate_alerts(now=now)
+        logger.info("alerts_evaluated triggered=%d", len(fired))
+    except Exception as exc:  # noqa: BLE001 - alert evaluation is non-critical
+        logger.warning("alert_evaluation_failed error=%s", exc)
+
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
