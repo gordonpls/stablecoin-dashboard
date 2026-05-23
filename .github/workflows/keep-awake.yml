@@ -1,0 +1,52 @@
+name: Keep app awake
+
+on:
+  schedule:
+    - cron: "0 */9 * * *"  # ~every 9 hours (fires 00:00, 09:00, 18:00 UTC)
+  workflow_dispatch:
+
+jobs:
+  wake:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Playwright + Chromium
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Visit app and wake it if asleep
+        env:
+          APP_URL: https://stablecoin-dashboard-gz.streamlit.app/
+        run: |
+          python - <<'PY'
+          import os, re
+          from playwright.sync_api import sync_playwright
+
+          url = os.environ["APP_URL"]
+          with sync_playwright() as p:
+              browser = p.chromium.launch()
+              page = browser.new_page()
+              # Streamlit keeps a WebSocket open, so the page never goes
+              # "networkidle"; wait on DOM then give the SPA time to render.
+              page.goto(url, wait_until="domcontentloaded", timeout=60000)
+              page.wait_for_timeout(8000)
+
+              # If the app is asleep, Streamlit shows a wake button.
+              wake = page.get_by_text(re.compile("get this app back up", re.I))
+              if wake.count() > 0:
+                  wake.first.click()
+                  print("App was asleep -> clicked the wake button.")
+                  page.wait_for_timeout(20000)  # let it boot back up
+              else:
+                  print("App already awake.")
+
+              # Hold the session briefly so it registers as real activity.
+              page.wait_for_timeout(5000)
+              browser.close()
+          PY
