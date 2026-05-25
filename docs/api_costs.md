@@ -19,9 +19,10 @@ All sources below are free tier unless marked otherwise.
 |---|---|---|---|
 | Binance | `/ticker/price` | 1–5 min | $0 |
 | Binance | `/depth` | 1×/hour | $0 |
-| Kraken | `/Ticker` | fallback only | $0 |
+| Coinbase | `/v2/prices/{pair}/spot` | fallback only | $0 |
 
-**Rate limits**: Binance 1200 req/min weight; Kraken 15 req/s
+**Rate limits**: Binance 1200 req/min weight; Coinbase ~10 req/s (public)
+**Geo note**: Binance returns HTTP 451 from some datacenter IPs (e.g. Streamlit Cloud); ingestion circuit-breaks it for 1h and falls back to Coinbase, then a single batched CoinGecko call.
 
 ## CoinGecko (fallback only)
 
