@@ -753,9 +753,12 @@ def render_under_the_hood() -> None:
     css = """
 <style>
 .uth-tab{position:fixed;right:0;top:50%;transform:translateY(-50%);z-index:100000;
-  background:#2563eb;color:#fff;font-weight:600;font-size:14px;writing-mode:vertical-rl;
+  background:#2563eb;font-weight:700;font-size:14px;writing-mode:vertical-rl;
   rotate:180deg;padding:16px 8px;border-radius:12px 0 0 12px;text-decoration:none;
   box-shadow:0 4px 14px rgba(0,0,0,.2);transition:padding .15s,opacity .2s;}
+/* Force white text — Streamlit's `.stMarkdown a` link color (a blue close to the
+   button) otherwise wins on specificity and the label blends into the button. */
+.uth-tab,.uth-tab:hover,.uth-tab:visited,.uth-tab:active{color:#fff !important;text-decoration:none !important;}
 .uth-tab:hover{padding-right:11px;}
 .uth-backdrop{position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,.45);
   backdrop-filter:blur(2px);opacity:0;pointer-events:none;transition:opacity .3s;}
@@ -814,6 +817,28 @@ body:has(.uth-drawer:target) .uth-tab{opacity:0;pointer-events:none;}
 """
     st.markdown(html, unsafe_allow_html=True)
 
+    # The drawer is pure-CSS (:target); add Escape-to-close via a tiny listener.
+    # st.markdown strips <script>, so use a 0-height components iframe — its
+    # same-origin srcdoc can reach window.parent to clear the #uth hash. Guarded
+    # so reruns don't stack duplicate listeners on the parent document.
+    components.html(
+        """
+<script>
+(function () {
+  const p = window.parent;
+  if (!p || p.__uthEscBound) return;
+  p.__uthEscBound = true;
+  p.document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && p.location.hash === "#uth") {
+      p.location.hash = "#_";
+    }
+  });
+})();
+</script>
+""",
+        height=0,
+    )
+
 
 # ── styles ────────────────────────────────────────────────────────────────────
 
@@ -865,8 +890,61 @@ def _inject_styles() -> None:
 
 /* ── Divider spacing ── */
 hr { margin: 28px 0 !important; opacity: 0.15 !important; }
+
+/* ── Skeleton loading shimmer ── */
+.sk {
+    background: linear-gradient(90deg,
+        rgba(130,130,130,0.10) 25%,
+        rgba(130,130,130,0.22) 37%,
+        rgba(130,130,130,0.10) 63%);
+    background-size: 400% 100%;
+    animation: sk-shimmer 1.4s ease infinite;
+    border-radius: 10px;
+}
+@keyframes sk-shimmer { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
+.sk-loading {
+    text-align: center;
+    font-size: 26px;
+    font-weight: 800;
+    letter-spacing: 0.01em;
+    color: #3b82f6;
+    margin: 4px 0 34px;
+    animation: sk-pulse 1.4s ease-in-out infinite;
+}
+@keyframes sk-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+@media (prefers-reduced-motion: reduce) { .sk, .sk-loading { animation: none; } }
 </style>
 """, unsafe_allow_html=True)
+
+
+def _render_skeleton() -> None:
+    """Shimmer placeholder shown on cold start until the dashboard data loads.
+
+    Mirrors the real header layout (title, sub-line, four stat cards, then the
+    Market Changes list) so the swap to real content doesn't shift the page.
+    """
+    cards = "".join(
+        '<div class="sk" style="height:150px;flex:1;border-top:3px solid rgba(130,130,130,0.25);"></div>'
+        for _ in range(4)
+    )
+    rows = "".join(
+        '<div class="sk" style="height:46px;width:100%;margin-bottom:10px;"></div>'
+        for _ in range(4)
+    )
+    st.markdown(
+        f"""
+<div style="padding-top:0.5rem;">
+  <div class="sk-loading">Loading live market data…</div>
+  <div class="sk" style="height:40px;width:44%;margin-bottom:12px;"></div>
+  <div class="sk" style="height:16px;width:72%;margin-bottom:30px;"></div>
+  <div style="display:flex;gap:16px;margin-bottom:36px;">{cards}</div>
+  <div class="sk" style="height:26px;width:28%;margin-bottom:8px;"></div>
+  <div class="sk" style="height:14px;width:60%;margin-bottom:20px;"></div>
+  {rows}
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
 
 def _stat_card(label: str, value: str, description: str, accent: str) -> str:
@@ -3349,11 +3427,24 @@ def main() -> None:
 
     # ── auto-refresh (always on) ───────────────────────────────────────────────
     st_autorefresh(interval=PRICE_REFRESH_SECS * 1000, key="data_autorefresh")
+
+    # Skeleton placeholder while the cold-start work (pipeline runs + uncached
+    # queries) completes. Only on the first run of a session — later autorefresh
+    # reruns read warm caches, so skipping it avoids a shimmer flash mid-view.
+    first_load = "_booted" not in st.session_state
+    loading = st.empty()
+    if first_load:
+        with loading.container():
+            _render_skeleton()
+
     if _run_scheduled_pipelines():
         st.cache_data.clear()
 
     overview_df = _safe(load_overview, default=pd.DataFrame(), where="Market data")
     scores_df   = _safe(load_latest_scores, default=pd.DataFrame(), where="Score data")
+
+    loading.empty()  # clear the skeleton before rendering real content
+    st.session_state["_booted"] = True
 
     render_header(overview_df)
     _safe(lambda: render_market_changes(load_market_changes()), where="Market Changes")
