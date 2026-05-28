@@ -92,13 +92,6 @@ def _run_scheduled_pipelines() -> bool:
     return ran
 
 
-st.set_page_config(
-    page_title="Stablecoin Dashboard",
-    page_icon=":bank:",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
-
 # ── design tokens ─────────────────────────────────────────────────────────────
 
 C_PRIMARY  = "#6366f1"
@@ -581,6 +574,245 @@ PROVIDER_COSTS = pd.DataFrame([
     {"provider": "Coinbase",  "endpoint": "spot_price",        "frequency": "fallback", "cost_usd": 0.00},
     {"provider": "CoinGecko",  "endpoint": "simple_price",     "frequency": "fallback", "cost_usd": 0.00},
 ])
+
+
+# ── top navigation bar ──────────────────────────────────────────────────────
+
+# Mirrors the navbar on gordonzhong.com so the standalone dashboard reads as part
+# of the same site. Left-to-right; all absolute, all open in the same tab. The
+# last item is this page, rendered as the active (non-link) item.
+NAV_LINKS: list[tuple[str, str, bool]] = [
+    ("Home",       "https://gordonzhong.com/",            False),
+    ("Resume",     "https://gordonzhong.com/#resume",     False),
+    ("Gallery",    "https://gordonzhong.com/#gallery",    False),
+    ("Allocation", "https://gordonzhong.com/#allocation", False),
+    ("Portfolio",  "https://gordonzhong.com/portfolio",   False),
+    ("Stablecoin", "https://gordonzhong.com/stablecoin",  True),
+]
+
+
+def render_navbar() -> None:
+    """Fixed top nav bar mirroring gordonzhong.com; call first on every render.
+
+    Streamlit selectors are version-specific. These target the testids shipped in
+    the repo's pinned Streamlit (1.57): ``stMainBlockContainer`` (main content
+    container, pushed down so it clears the fixed bar) and ``stHeader`` (default
+    top chrome, made transparent + click-through so its sidebar toggle and menu
+    stay usable beneath/around the bar).
+    """
+    items = []
+    for label, href, active in NAV_LINKS:
+        if active:
+            items.append(f'<span class="gz-nav-item gz-nav-active">{label}</span>')
+        else:
+            # target="_self" → same tab, per spec.
+            items.append(f'<a class="gz-nav-item" href="{href}" target="_self">{label}</a>')
+    links_html = "".join(items)
+
+    st.markdown(
+        f"""
+<style>
+.gz-navbar {{
+    position: fixed; top: 0; left: 0; right: 0;
+    height: 60px; z-index: 9999;
+    background: #ECECEC;
+    border-bottom: 1px solid #d4d4d4;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+    display: flex; align-items: center; justify-content: center;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    /* Let clicks in the bar's empty edges fall through to Streamlit's own
+       toggle / menu buttons; the links themselves re-enable pointer events. */
+    pointer-events: none;
+}}
+.gz-navbar-inner {{
+    display: flex; align-items: center; justify-content: center;
+    flex-wrap: nowrap; overflow-x: auto;
+    gap: 0 30px; max-width: 100%; padding: 0 20px;
+    scrollbar-width: none;
+}}
+.gz-navbar-inner::-webkit-scrollbar {{ display: none; }}
+.gz-nav-item {{
+    pointer-events: auto;
+    font-size: 15px; font-weight: 500;
+    color: #1C7ED6; text-decoration: none;
+    padding: 6px 2px; white-space: nowrap;
+    transition: color 0.15s ease;
+}}
+.gz-nav-item:hover {{ color: #2B7FFF; text-decoration: underline; }}
+.gz-nav-active {{
+    color: #111; font-weight: 800; cursor: default;
+    border-bottom: 2px solid #1C7ED6;
+}}
+.gz-nav-active:hover {{ color: #111; text-decoration: none; }}
+@media (max-width: 640px) {{
+    .gz-nav-item {{ font-size: 13px; }}
+    .gz-navbar-inner {{ gap: 0 18px; justify-content: flex-start; padding: 0 12px; }}
+}}
+
+/* Push app content (and sidebar content) clear of the fixed bar. */
+[data-testid="stMainBlockContainer"] {{ padding-top: 5rem; }}
+[data-testid="stSidebar"] > div:first-child {{ padding-top: 4.5rem; }}
+
+/* Make Streamlit's default header fully click-through so link clicks reach the
+   bar beneath it. A full-width wrapper div inside the header would otherwise
+   swallow clicks over the centered links, so null out the whole subtree and
+   re-enable pointer events on ONLY the real controls (main menu + the
+   collapsed-sidebar expander) so the sidebar stays reachable. */
+header[data-testid="stHeader"] {{ background: transparent; }}
+header[data-testid="stHeader"],
+header[data-testid="stHeader"] * {{ pointer-events: none; }}
+[data-testid="stToolbar"], [data-testid="stToolbar"] *,
+[data-testid="stMainMenu"], [data-testid="stMainMenu"] *,
+[data-testid="stExpandSidebarButton"], [data-testid="stExpandSidebarButton"] * {{
+    pointer-events: auto;
+}}
+[data-testid="stDecoration"] {{ display: none; }}
+</style>
+<div class="gz-navbar"><nav class="gz-navbar-inner">{links_html}</nav></div>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+# ── "under the hood" drawer ───────────────────────────────────────────────────
+
+def render_under_the_hood() -> None:
+    """CSS-only slide-out drawer documenting the app's architecture.
+
+    Pure HTML/CSS (``:target`` + ``body:has(...)``), no JS and no component
+    dependency. Renders a fixed tab on the right edge that opens a drawer over
+    everything (z-index above the navbar). Call once after render_navbar().
+
+    Figures below are verified against the repo/DB; they are approximate and
+    drift slowly as the nightly job appends snapshots.
+    """
+    one_liner = (
+        "A cost-conscious Streamlit dashboard that tracks 320+ stablecoins — circulating "
+        "supply, peg deviation, liquidity depth, reserve freshness — and rolls them into an "
+        "explainable weighted risk score, stored as daily time-series snapshots."
+    )
+    stack = [
+        ("Frontend", ["Streamlit ≥1.35 + autorefresh", "Plotly ≥5.22", "pandas ≥2.2"]),
+        ("Ingestion", ["Python 3.11", "async httpx ≥0.27", "structlog", "FastAPI (optional, not deployed)"]),
+        ("Storage", ["SQLite + SQLAlchemy 2.0 ORM", "DB committed to git", "Postgres-capable (unused)"]),
+        ("Hosting / CI", ["Streamlit Community Cloud", "GitHub Actions nightly (02:00 UTC)", "keep-awake (~9h, headless Chromium)"]),
+        ("Quality", ["ruff", "mypy", "pytest + asyncio", "456 tests / 26 files"]),
+    ]
+    data_flow = (
+        "GitHub Actions runs four nightly pipelines — update_supply (DefiLlama), update_prices "
+        "(Binance → Coinbase → batched CoinGecko), update_reserves (curated transparency URLs), and "
+        "score_stablecoins. Every external call funnels through core.http.tracked_get: budget check → "
+        "in-memory TTL cache → fetch → log → store. Normalized rows persist as snapshots in SQLite; the "
+        "job commits the updated .db back to the repo ([skip ci]). The dashboard itself makes zero "
+        "network calls — it reads SQLite through a cached services layer (st.cache_data, 30–300s) with "
+        "autorefresh re-rendering."
+    )
+    diagram = (
+        " GitHub Actions (cron 02:00 UTC)\n"
+        "        │ runs pipelines\n"
+        "        ▼\n"
+        " ingestion/* ──tracked_get──► [ budget → cache → fetch → log ]\n"
+        "   DefiLlama / Binance              │\n"
+        "   Coinbase / CoinGecko             ▼\n"
+        "                            SQLite (time-series snapshots)\n"
+        "                                    │ commit .db to git\n"
+        "                                    ▼\n"
+        "                       Streamlit app (reads DB only,\n"
+        "                       st.cache_data 30–300s, autorefresh)\n"
+        "                                    ▼\n"
+        "                                 Browser\n\n"
+        " keep-awake.yml (~9h, headless Chromium) ──► wakes Streamlit"
+    )
+    decisions = [
+        ("Read-only-FS deploy", "Streamlit Cloud's read-only overlay → the model layer probes real writability and falls back to a /tmp copy seeded from the committed DB, with NullPool so a git-swapped .db never surfaces “disk image malformed.”"),
+        ("Binance 451 geo-block", "Datacenter IPs get HTTP 451, so a 1-hour circuit-breaker stops hammering a dead provider — Coinbase then a single batched CoinGecko call are the fallbacks, recording provider provenance per price."),
+        ("Single cost funnel", "Every call routes through tracked_get, which enforces per-provider daily budgets, RPM limits, caching, and logging — keeping paid calls off the frontend entirely."),
+        ("Data as a git artifact", "The nightly job commits the SQLite snapshot back to the repo for free persistence (no hosted DB) — which is what drove the read-only file-swap hardening above."),
+        ("Explainable scoring", "Deterministic 0–100 sub-scores from one shared weights constant (peg .35 / liquidity .25 / reserve .25 / adoption .15), so the UI drilldown can never disagree with the pipeline."),
+    ]
+    metrics = ["322 stablecoins", "243 with supply history", "~23k supply snapshots",
+               "~19k risk scores", "228 reserve reports", "30–300s UI cache", "456 tests / 26 files"]
+    metrics_note = "Bundle size / Lighthouse: N/A for Streamlit; coverage % not measured."
+
+    def esc(s: str) -> str:
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    stack_html = "".join(
+        f'<div class="uth-card"><div class="uth-card-h">{esc(label)}</div><ul>'
+        + "".join(f'<li><span class="uth-b">›</span>{esc(it)}</li>' for it in items)
+        + "</ul></div>"
+        for label, items in stack
+    )
+    dec_html = "".join(
+        f'<div class="uth-card"><div class="uth-card-t">{esc(t)}</div>'
+        f'<div class="uth-card-b">{esc(b)}</div></div>'
+        for t, b in decisions
+    )
+    chips_html = "".join(f'<span class="uth-chip">{esc(m)}</span>' for m in metrics)
+
+    css = """
+<style>
+.uth-tab{position:fixed;right:0;top:50%;transform:translateY(-50%);z-index:100000;
+  background:#2563eb;color:#fff;font-weight:600;font-size:14px;writing-mode:vertical-rl;
+  rotate:180deg;padding:16px 8px;border-radius:12px 0 0 12px;text-decoration:none;
+  box-shadow:0 4px 14px rgba(0,0,0,.2);transition:padding .15s,opacity .2s;}
+.uth-tab:hover{padding-right:11px;}
+.uth-backdrop{position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,.45);
+  backdrop-filter:blur(2px);opacity:0;pointer-events:none;transition:opacity .3s;}
+.uth-drawer{position:fixed;top:0;right:0;height:100%;width:min(92vw,36rem);z-index:100001;
+  background:#f5f6f8;color:#1f2937;box-shadow:-12px 0 40px rgba(0,0,0,.25);
+  transform:translateX(100%);transition:transform .3s ease;overflow-y:auto;
+  font-family:ui-sans-serif,system-ui,sans-serif;}
+.uth-drawer:target{transform:translateX(0);}
+body:has(.uth-drawer:target) .uth-backdrop{opacity:1;pointer-events:auto;}
+body:has(.uth-drawer:target) .uth-tab{opacity:0;pointer-events:none;}
+.uth-head{position:sticky;top:0;background:#f5f6f8;display:flex;justify-content:space-between;
+  align-items:flex-start;gap:12px;padding:20px;border-bottom:1px solid #e5e7eb;}
+.uth-eyebrow{font-size:11px;text-transform:uppercase;letter-spacing:.12em;color:#1e3a8a;font-weight:700;}
+.uth-title{font-size:20px;font-weight:800;margin-top:2px;color:#111827;}
+.uth-close{font-size:18px;color:#6b7280;text-decoration:none;padding:4px 9px;border-radius:8px;}
+.uth-close:hover{background:#e5e7eb;color:#111827;}
+.uth-body{padding:24px 20px;}
+.uth-lead{color:#374151;line-height:1.6;margin:0 0 28px;}
+.uth-sec{margin-bottom:34px;}
+.uth-h3{font-size:12px;text-transform:uppercase;letter-spacing:.12em;color:#9ca3af;font-weight:700;margin:0 0 12px;}
+.uth-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+@media(max-width:520px){.uth-grid{grid-template-columns:1fr;}}
+.uth-stack{display:flex;flex-direction:column;gap:12px;}
+.uth-card{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:14px;}
+.uth-card-h{font-size:14px;font-weight:600;color:#111827;margin-bottom:8px;}
+.uth-card ul{list-style:none;margin:0;padding:0;}
+.uth-card li{font-size:14px;color:#374151;display:flex;gap:8px;margin:4px 0;}
+.uth-b{color:#93b4f7;}
+.uth-card-t{font-weight:600;color:#111827;margin-bottom:4px;}
+.uth-card-b{font-size:14px;color:#374151;line-height:1.5;}
+.uth-flow{color:#374151;line-height:1.6;margin:0 0 12px;}
+.uth-pre{background:#0b0e14;color:#e5e7eb;border-radius:12px;padding:16px;font-size:12px;
+  line-height:1.5;overflow-x:auto;font-family:ui-monospace,Menlo,monospace;white-space:pre;}
+.uth-chips{display:flex;flex-wrap:wrap;gap:8px;}
+.uth-chip{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:6px 12px;font-size:14px;color:#374151;font-weight:500;}
+.uth-note{font-size:11px;color:#9ca3af;margin-top:8px;}
+</style>
+"""
+
+    html = css + f"""
+<a class="uth-tab" href="#uth">Under the hood</a>
+<a class="uth-backdrop" href="#_"></a>
+<div id="uth" class="uth-drawer">
+  <div class="uth-head">
+    <div><div class="uth-eyebrow">Under the hood</div><div class="uth-title">How this dashboard is built</div></div>
+    <a class="uth-close" href="#_">✕</a>
+  </div>
+  <div class="uth-body">
+    <p class="uth-lead">{esc(one_liner)}</p>
+    <div class="uth-sec"><div class="uth-h3">Stack</div><div class="uth-grid">{stack_html}</div></div>
+    <div class="uth-sec"><div class="uth-h3">Architecture</div><p class="uth-flow">{esc(data_flow)}</p><pre class="uth-pre">{esc(diagram)}</pre></div>
+    <div class="uth-sec"><div class="uth-h3">Key decisions &amp; challenges</div><div class="uth-stack">{dec_html}</div></div>
+    <div class="uth-sec"><div class="uth-h3">By the numbers</div><div class="uth-chips">{chips_html}</div><p class="uth-note">{esc(metrics_note)}</p></div>
+  </div>
+</div>
+"""
+    st.markdown(html, unsafe_allow_html=True)
 
 
 # ── styles ────────────────────────────────────────────────────────────────────
@@ -3100,7 +3332,19 @@ def _safe(fn, *args, default=None, where: str = "This section"):
 
 
 def main() -> None:
+    # Must be the first Streamlit call and must run every rerun/session — keeping
+    # it here (not at module level) ensures the "wide" layout is reapplied on
+    # browser reloads, which would otherwise fall back to the centered default
+    # because the cached module skips a module-level set_page_config.
+    st.set_page_config(
+        page_title="Stablecoin Dashboard",
+        page_icon=":bank:",
+        layout="wide",
+        initial_sidebar_state="collapsed",
+    )
     init_db()
+    render_navbar()  # first content, so the fixed bar sits above all other content
+    render_under_the_hood()
     _inject_styles()
 
     # ── auto-refresh (always on) ───────────────────────────────────────────────
