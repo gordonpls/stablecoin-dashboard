@@ -676,16 +676,19 @@ def render_navbar() -> None:
 }}
 .gz-nav-active:hover {{ color: #111; text-decoration: none; }}
 @media (max-width: 640px) {{
-    /* Hide Streamlit's entire right-side toolbar (Deploy button, main menu,
-       running-status indicator) on mobile — it occupies the same row as the
-       navbar and overlaps the rightmost links (the Deploy button is ~90px
-       and is owner-only chrome, not user-facing). The sidebar expand button
-       (>>) is in stHeader, NOT stToolbar, so it stays visible/usable. */
-    [data-testid="stToolbar"] {{ display: none !important; }}
+    /* Hide ONLY the owner-only Streamlit chrome that overlapped the navbar
+       (Deploy button + status widget + main menu). Do NOT hide the whole
+       stToolbar — in this Streamlit version the sidebar >> expand button
+       appears to render inside stToolbar on mobile, and we want to keep it. */
+    [data-testid="stDeployButton"],
+    [data-testid="stStatusWidget"],
+    [data-testid="stMainMenu"] {{ display: none !important; }}
 
-    .gz-nav-item {{ font-size: 13px; }}
-    /* Reserve room at the left for the sidebar >> expand button. */
-    .gz-navbar-inner {{ gap: 0 16px; justify-content: flex-start; padding: 0 12px 0 56px; }}
+    /* Tighter typography so all six links fit on a phone viewport (~375px
+       minimum). Centered, minimal symmetric padding — overflow-x:auto on the
+       inner is still in place from the base rule as a safety net. */
+    .gz-nav-item {{ font-size: 11px; padding: 4px 0; }}
+    .gz-navbar-inner {{ gap: 0 10px; justify-content: center; padding: 0 6px; }}
 }}
 
 /* Push app content (and sidebar content) clear of the fixed bar. */
