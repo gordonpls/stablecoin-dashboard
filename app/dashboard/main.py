@@ -9,6 +9,7 @@ import os
 import sys
 import time
 import logging
+import threading
 from pathlib import Path
 
 # Ensure repo root is on sys.path regardless of Streamlit's working directory.
@@ -52,44 +53,74 @@ WATCHLIST_ENABLED = False
 # defaults to the historical value so existing deployments keep working.
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "2026")
 
-# Process-level timestamps so the timer survives multiple browser sessions
-# without hammering the APIs on every new connection.
-_PIPELINE_LAST_RUN: dict[str, float] = {"prices": 0.0, "supply": 0.0}
+# Process-level orchestration for background pipeline runs. Threads are daemons
+# so they die with the process; the engine uses NullPool + check_same_thread=
+# False + a 30s busy_timeout, so a worker thread getting its own get_session()
+# is safe and won't block reader queries on the render thread for long.
+_PIPELINE_LAST_RUN:   dict[str, float]              = {"prices": 0.0, "supply": 0.0}
+_PIPELINE_THREADS:    dict[str, threading.Thread]   = {}
+_PIPELINE_COMPLETED:  set[str]                      = set()
+_PIPELINE_LOCK = threading.Lock()
+
+
+def _supply_pipeline_job() -> None:
+    import core.cache as _api_cache
+    import pipelines.update_supply   as _supply
+    import pipelines.update_reserves as _reserves
+    try:
+        _api_cache.clear("defillama")
+        _supply.run()
+        _reserves.run()
+        with _PIPELINE_LOCK:
+            _PIPELINE_COMPLETED.add("supply")
+    except Exception as exc:
+        logger.warning("auto_supply_pipeline_failed error=%s", exc)
+
+
+def _prices_pipeline_job() -> None:
+    import core.cache as _api_cache
+    import pipelines.update_prices     as _prices
+    import pipelines.score_stablecoins as _scores
+    try:
+        _api_cache.clear("binance")
+        _api_cache.clear("coinbase")
+        _prices.run()
+        _scores.run()
+        with _PIPELINE_LOCK:
+            _PIPELINE_COMPLETED.add("prices")
+    except Exception as exc:
+        logger.warning("auto_price_pipeline_failed error=%s", exc)
+
+
+def _maybe_spawn(name: str, interval: int, job) -> None:
+    """Start ``job`` in a daemon thread if its interval elapsed and no run is
+    already in flight. ``_PIPELINE_LAST_RUN`` is updated at *schedule* time
+    (not completion) so repeated reruns don't pile up duplicate workers."""
+    now = time.time()
+    with _PIPELINE_LOCK:
+        if now - _PIPELINE_LAST_RUN[name] < interval:
+            return
+        thr = _PIPELINE_THREADS.get(name)
+        if thr is not None and thr.is_alive():
+            return
+        _PIPELINE_LAST_RUN[name] = now
+        t = threading.Thread(target=job, name=f"pipeline-{name}", daemon=True)
+        _PIPELINE_THREADS[name] = t
+    t.start()
 
 
 def _run_scheduled_pipelines() -> bool:
-    """Run pipelines whose interval has elapsed. Returns True if any pipeline ran."""
-    import core.cache as _api_cache
-    import pipelines.update_prices     as _prices
-    import pipelines.update_supply     as _supply
-    import pipelines.update_reserves   as _reserves
-    import pipelines.score_stablecoins as _scores
-
-    now = time.time()
-    ran = False
-
-    if now - _PIPELINE_LAST_RUN["supply"] >= SUPPLY_REFRESH_SECS:
-        try:
-            _api_cache.clear("defillama")
-            _supply.run()
-            _reserves.run()
-            _PIPELINE_LAST_RUN["supply"] = now
-            ran = True
-        except Exception as exc:
-            logger.warning("auto_supply_pipeline_failed error=%s", exc)
-
-    if now - _PIPELINE_LAST_RUN["prices"] >= PRICE_REFRESH_SECS:
-        try:
-            _api_cache.clear("binance")
-            _api_cache.clear("coinbase")
-            _prices.run()
-            _scores.run()
-            _PIPELINE_LAST_RUN["prices"] = now
-            ran = True
-        except Exception as exc:
-            logger.warning("auto_price_pipeline_failed error=%s", exc)
-
-    return ran
+    """Schedule due pipelines in background threads. **Non-blocking** — the
+    render thread never waits for the network. Returns True only when a
+    background pipeline *completed* since the last call, so the caller can
+    invalidate caches and surface the fresh rows on this render."""
+    _maybe_spawn("supply", SUPPLY_REFRESH_SECS, _supply_pipeline_job)
+    _maybe_spawn("prices", PRICE_REFRESH_SECS,  _prices_pipeline_job)
+    with _PIPELINE_LOCK:
+        if _PIPELINE_COMPLETED:
+            _PIPELINE_COMPLETED.clear()
+            return True
+    return False
 
 
 # ── design tokens ─────────────────────────────────────────────────────────────
