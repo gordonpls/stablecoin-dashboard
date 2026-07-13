@@ -609,36 +609,113 @@ PROVIDER_COSTS = pd.DataFrame([
 
 # ── top navigation bar ──────────────────────────────────────────────────────
 
-# Mirrors the navbar on gordonzhong.com so the standalone dashboard reads as part
-# of the same site. Left-to-right; all absolute, all open in the same tab. The
-# last item is this page, rendered as the active (non-link) item.
-NAV_LINKS: list[tuple[str, str, bool]] = [
-    ("Home",       "https://gordonzhong.com/",            False),
-    ("Resume",     "https://gordonzhong.com/#resume",     False),
-    ("Gallery",    "https://gordonzhong.com/#gallery",    False),
-    ("Allocation", "https://gordonzhong.com/#allocation", False),
-    ("Portfolio",  "https://gordonzhong.com/portfolio",   False),
-    ("Stablecoin", "https://gordonzhong.com/stablecoin",  True),
+# Ported from portfolio2025/src/components/Navbar.tsx (the gordonzhong.com
+# React/Tailwind/DaisyUI navbar) so the standalone dashboard reads as part of
+# the same site. Every link is external and opens in a new tab — this page is
+# itself one of the "Projects" entries, not gordonzhong.com's home view, so the
+# source's "Home click while already on / scrolls instead of navigating" case
+# never applies here and is intentionally dropped.
+GZ_SITE = "https://gordonzhong.com"
+NAV_HOME = ("Home", f"{GZ_SITE}/")
+NAV_LEAD_LINKS = [
+    ("About", f"{GZ_SITE}/#about"),
+    ("Resume", f"{GZ_SITE}/#resume"),
+]
+# label, href, is_current_page — mirrors PROJECT_LINKS in Navbar.tsx.
+NAV_PROJECT_LINKS: list[tuple[str, str, bool]] = [
+    ("Allocation Quiz", f"{GZ_SITE}/allocation", False),
+    ("Investing Dashboard", f"{GZ_SITE}/investments", False),
+    ("Stablecoin Dashboard", f"{GZ_SITE}/stablecoin", True),
+    ("Daily Fortune Cookie", f"{GZ_SITE}/fortune", False),
+]
+NAV_PROJECTS_HOME = f"{GZ_SITE}/#projects"
+NAV_TAIL_LINKS = [
+    ("Highlights", f"{GZ_SITE}/#highlights"),
+    ("Gallery", f"{GZ_SITE}/#gallery"),
 ]
 
 
+def _gz_nav_link(label: str, href: str) -> str:
+    return f'<a class="gz-nav-link" href="{href}" target="_blank" rel="noopener noreferrer">{label}</a>'
+
+
+def _gz_project_item(label: str, href: str, current: bool) -> str:
+    if current:
+        return f'<span class="gz-nav-link gz-nav-active" aria-current="page">{label}</span>'
+    return _gz_nav_link(label, href)
+
+
 def render_navbar() -> None:
-    """Fixed top nav bar mirroring gordonzhong.com; call first on every render.
+    """Fixed top nav bar ported from the gordonzhong.com React navbar; call
+    first on every render.
 
     Streamlit selectors are version-specific. These target the testids shipped in
     the repo's pinned Streamlit (1.57): ``stMainBlockContainer`` (main content
     container, pushed down so it clears the fixed bar) and ``stHeader`` (default
     top chrome, made transparent + click-through so its sidebar toggle and menu
     stay usable beneath/around the bar).
+
+    Streamlit has no client routing or CSS hover-on-anchor-focus story out of
+    the box, so the desktop "Projects" hover/focus submenu and the mobile
+    hamburger/accordion menus are pure CSS (``:hover``/``:focus-within`` and
+    native ``<details>`` disclosure — no JS needed for open/close, and both are
+    natively keyboard + screen-reader accessible). A small ``components.html``
+    script (the same window.parent bridge pattern as the "under the hood"
+    drawer's Escape handler) only handles the two things CSS can't: syncing
+    aria-expanded on the Projects trigger, and the jump-to-top button's
+    scroll-triggered visibility + smooth scroll.
     """
-    items = []
-    for label, href, active in NAV_LINKS:
-        if active:
-            items.append(f'<span class="gz-nav-item gz-nav-active">{label}</span>')
-        else:
-            # target="_self" → same tab, per spec.
-            items.append(f'<a class="gz-nav-item" href="{href}" target="_self">{label}</a>')
-    links_html = "".join(items)
+    project_items_html = "".join(
+        f"<li>{_gz_project_item(label, href, current)}</li>"
+        for label, href, current in NAV_PROJECT_LINKS
+    )
+
+    mobile_html = f"""
+<details class="gz-mobile-menu">
+  <summary class="gz-hamburger-btn" aria-label="Open navigation menu" aria-haspopup="true">
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M4 6h16M4 12h16M4 18h16"/>
+    </svg>
+  </summary>
+  <ul class="gz-mobile-panel">
+    <li>{_gz_nav_link(*NAV_HOME)}</li>
+    {"".join(f"<li>{_gz_nav_link(label, href)}</li>" for label, href in NAV_LEAD_LINKS)}
+    <li>
+      <details class="gz-mobile-projects">
+        <summary>Projects</summary>
+        <ul>
+          <li>{_gz_nav_link("All projects", NAV_PROJECTS_HOME)}</li>
+          {project_items_html}
+        </ul>
+      </details>
+    </li>
+    {"".join(f"<li>{_gz_nav_link(label, href)}</li>" for label, href in NAV_TAIL_LINKS)}
+  </ul>
+</details>
+"""
+
+    desktop_html = f"""
+<nav class="gz-nav-center" aria-label="Primary">
+  <ul class="gz-nav-list">
+    <li>{_gz_nav_link(*NAV_HOME)}</li>
+    {"".join(f"<li>{_gz_nav_link(label, href)}</li>" for label, href in NAV_LEAD_LINKS)}
+    <li class="gz-nav-dropdown">
+      <a class="gz-nav-link gz-nav-projects-trigger" href="{NAV_PROJECTS_HOME}" target="_blank"
+         rel="noopener noreferrer" aria-haspopup="true" aria-expanded="false">
+        Projects
+        <svg class="gz-chevron" viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true">
+          <path d="M7 10l5 5 5-5z"/>
+        </svg>
+      </a>
+      <ul class="gz-nav-submenu">
+        {project_items_html}
+      </ul>
+    </li>
+    {"".join(f"<li>{_gz_nav_link(label, href)}</li>" for label, href in NAV_TAIL_LINKS)}
+  </ul>
+</nav>
+"""
 
     st.markdown(
         f"""
@@ -649,33 +726,105 @@ def render_navbar() -> None:
     background: #ECECEC;
     border-bottom: 1px solid #d4d4d4;
     box-shadow: 0 1px 4px rgba(0,0,0,0.08);
-    display: flex; align-items: center; justify-content: center;
+    display: grid; grid-template-columns: 1fr auto 1fr; align-items: center;
+    padding: 0 16px;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     /* Let clicks in the bar's empty edges fall through to Streamlit's own
-       toggle / menu buttons; the links themselves re-enable pointer events. */
+       toggle / menu buttons; the zones themselves re-enable pointer events. */
     pointer-events: none;
 }}
-.gz-navbar-inner {{
-    display: flex; align-items: center; justify-content: center;
-    flex-wrap: nowrap; overflow-x: auto;
-    gap: 0 30px; max-width: 100%; padding: 0 20px;
-    scrollbar-width: none;
+.gz-nav-start {{ justify-self: start; pointer-events: auto; display: flex; align-items: center;
+    /* Clears Streamlit's own collapsed-sidebar expand chevron, which also sits
+       in the top-left corner of the header above this bar. */
+    margin-left: 44px; }}
+.gz-nav-center {{ justify-self: center; pointer-events: auto; }}
+.gz-nav-end {{ justify-self: end; pointer-events: auto; display: flex; align-items: center; }}
+
+.gz-nav-list {{
+    display: flex; align-items: center; gap: 26px;
+    list-style: none; margin: 0; padding: 0;
 }}
-.gz-navbar-inner::-webkit-scrollbar {{ display: none; }}
-.gz-nav-item {{
-    pointer-events: auto;
-    font-size: 15px; font-weight: 500;
-    color: #1C7ED6; text-decoration: none;
-    padding: 6px 2px; white-space: nowrap;
+.gz-nav-list > li {{ position: relative; display: flex; align-items: center; }}
+/* !important defeats Streamlit's own `.stMarkdown a` rule, which otherwise
+   outranks a single class selector on specificity and forces every link
+   underlined + themed blue regardless of hover state (see the "under the
+   hood" tab's color fix above for the same fight). */
+.gz-nav-link {{
+    color: #1C7ED6 !important; text-decoration: none !important; white-space: nowrap;
+    font-size: 15px; font-weight: 500; padding: 6px 2px;
+    display: inline-flex; align-items: center; gap: 4px;
     transition: color 0.15s ease;
 }}
-.gz-nav-item:hover {{ color: #2B7FFF; text-decoration: underline; }}
-.gz-nav-active {{
-    color: #111; font-weight: 800; cursor: default;
-    border-bottom: 2px solid #1C7ED6;
+.gz-nav-link:hover {{ color: #2B7FFF !important; text-decoration: underline !important; }}
+.gz-nav-active {{ color: #111 !important; font-weight: 800; cursor: default; border-bottom: 2px solid #1C7ED6; }}
+.gz-nav-active:hover {{ color: #111 !important; text-decoration: none !important; }}
+
+/* Projects dropdown — opens on hover and on keyboard focus (:focus-within
+   covers tabbing into the trigger or the submenu links), flush against the
+   trigger so there's no dead zone for the cursor to cross.
+   !important on display is required: the submenu <ul> is a direct child of an
+   <li>, and Streamlit's own markdown list CSS ships a same-shape selector
+   ("... li greater-than ul" with display:block) whose specificity (one class
+   plus two elements) otherwise beats this single-class rule and leaves the
+   dropdown permanently open. */
+.gz-chevron {{ transition: transform 0.15s ease; }}
+.gz-nav-dropdown:hover .gz-chevron, .gz-nav-dropdown:focus-within .gz-chevron {{ transform: rotate(180deg); }}
+.gz-nav-submenu {{
+    display: none !important; position: absolute; top: 100%; left: 0; margin: 0;
+    list-style: none; padding: 6px; min-width: 210px;
+    background: #fff; border: 1px solid #d4d4d4; border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.14); z-index: 10000;
 }}
-.gz-nav-active:hover {{ color: #111; text-decoration: none; }}
-@media (max-width: 640px) {{
+.gz-nav-dropdown:hover .gz-nav-submenu, .gz-nav-dropdown:focus-within .gz-nav-submenu {{ display: block !important; }}
+.gz-nav-submenu li {{ list-style: none; }}
+.gz-nav-submenu .gz-nav-link {{ display: block; padding: 8px 10px; border-radius: 6px; font-size: 14px; }}
+.gz-nav-submenu .gz-nav-link:hover {{ background: #f1f5fb; text-decoration: none; }}
+.gz-nav-submenu .gz-nav-active {{ display: block; padding: 8px 10px; border-radius: 6px; font-size: 14px; }}
+
+/* Jump-to-top — only meaningful once scrolled; components.html script below
+   toggles .gz-visible based on window.parent scroll position. */
+.gz-jump-top {{
+    pointer-events: none; opacity: 0; transition: opacity 0.2s ease;
+    width: 34px; height: 34px; display: flex; align-items: center; justify-content: center;
+    background: transparent; border: 2px solid #1C7ED6; border-radius: 8px;
+    color: #1C7ED6; cursor: pointer;
+}}
+.gz-jump-top.gz-visible {{ opacity: 1; pointer-events: auto; }}
+.gz-jump-top:hover {{ background: rgba(28,126,214,0.08); }}
+
+/* Mobile hamburger + accordion menu — native <details>/<summary>, no JS. */
+.gz-mobile-menu {{ display: none; position: relative; }}
+.gz-mobile-menu summary {{ list-style: none; }}
+.gz-mobile-menu summary::-webkit-details-marker {{ display: none; }}
+.gz-hamburger-btn {{
+    cursor: pointer; width: 36px; height: 36px; border-radius: 8px;
+    display: flex; align-items: center; justify-content: center; color: #1C7ED6;
+}}
+.gz-hamburger-btn:hover {{ background: rgba(0,0,0,0.06); }}
+.gz-mobile-panel {{
+    position: absolute; top: 100%; left: 0; margin-top: 6px;
+    list-style: none; padding: 8px; min-width: 220px;
+    background: #fff; border: 1px solid #d4d4d4; border-radius: 10px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.16); z-index: 10000;
+}}
+.gz-mobile-panel li {{ list-style: none; }}
+.gz-mobile-panel > li > .gz-nav-link {{ display: block; padding: 9px 10px; border-radius: 6px; font-size: 14px; }}
+.gz-mobile-panel > li > .gz-nav-link:hover {{ background: #f1f5fb; text-decoration: none; }}
+.gz-mobile-projects summary {{
+    cursor: pointer; color: #1C7ED6; font-size: 14px; font-weight: 500;
+    padding: 9px 10px; border-radius: 6px;
+}}
+.gz-mobile-projects summary:hover {{ background: #f1f5fb; }}
+.gz-mobile-projects ul {{ list-style: none; margin: 0; padding: 2px 0 2px 14px; }}
+.gz-mobile-projects .gz-nav-link, .gz-mobile-projects .gz-nav-active {{
+    display: block; padding: 8px 10px; border-radius: 6px; font-size: 13px;
+}}
+.gz-mobile-projects .gz-nav-link:hover {{ background: #f1f5fb; text-decoration: none; }}
+
+@media (max-width: 767px) {{
+    .gz-nav-center {{ display: none; }}
+    .gz-mobile-menu {{ display: block; }}
+
     /* Hide ONLY the owner-only Streamlit chrome that overlapped the navbar
        (Deploy button + status widget + main menu). Do NOT hide the whole
        stToolbar — in this Streamlit version the sidebar >> expand button
@@ -683,12 +832,6 @@ def render_navbar() -> None:
     [data-testid="stDeployButton"],
     [data-testid="stStatusWidget"],
     [data-testid="stMainMenu"] {{ display: none !important; }}
-
-    /* Tighter typography so all six links fit on a phone viewport (~375px
-       minimum). Centered, minimal symmetric padding — overflow-x:auto on the
-       inner is still in place from the base rule as a safety net. */
-    .gz-nav-item {{ font-size: 11px; padding: 4px 0; }}
-    .gz-navbar-inner {{ gap: 0 10px; justify-content: center; padding: 0 6px; }}
 }}
 
 /* Push app content (and sidebar content) clear of the fixed bar. */
@@ -710,9 +853,89 @@ header[data-testid="stHeader"] * {{ pointer-events: none; }}
 }}
 [data-testid="stDecoration"] {{ display: none; }}
 </style>
-<div class="gz-navbar"><nav class="gz-navbar-inner">{links_html}</nav></div>
+<div class="gz-navbar">
+  <div class="gz-nav-start">{mobile_html}</div>
+  {desktop_html}
+  <div class="gz-nav-end">
+    <button type="button" id="gz-jump-top" class="gz-jump-top" aria-label="Scroll to top">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M5 15l7-7 7 7"/>
+      </svg>
+    </button>
+  </div>
+</div>
 """,
         unsafe_allow_html=True,
+    )
+
+    # CSS alone covers open/close for both dropdowns; JS only syncs
+    # aria-expanded on the Projects trigger and drives the jump-to-top button
+    # (visibility on scroll, smooth scroll on click). Bound once via a flag on
+    # window.parent and delegated off document so it survives Streamlit
+    # re-rendering the navbar's markup on every rerun (see the "under the
+    # hood" drawer's Escape handler above for the same pattern).
+    components.html(
+        """
+<script>
+(function () {
+  const p = window.parent;
+  if (!p || p.__gzNavBound) return;
+  p.__gzNavBound = true;
+  const doc = p.document;
+
+  function projectsTrigger(target) {
+    const li = target.closest && target.closest('.gz-nav-dropdown');
+    return li ? li.querySelector('.gz-nav-projects-trigger') : null;
+  }
+
+  doc.addEventListener('mouseover', function (e) {
+    const t = projectsTrigger(e.target);
+    if (t) t.setAttribute('aria-expanded', 'true');
+  });
+  doc.addEventListener('mouseout', function (e) {
+    const li = e.target.closest && e.target.closest('.gz-nav-dropdown');
+    if (li && !li.contains(e.relatedTarget)) {
+      const t = li.querySelector('.gz-nav-projects-trigger');
+      if (t) t.setAttribute('aria-expanded', 'false');
+    }
+  });
+  doc.addEventListener('focusin', function (e) {
+    const t = projectsTrigger(e.target);
+    if (t) t.setAttribute('aria-expanded', 'true');
+  });
+  doc.addEventListener('focusout', function (e) {
+    const li = e.target.closest && e.target.closest('.gz-nav-dropdown');
+    if (li && !li.contains(e.relatedTarget)) {
+      const t = li.querySelector('.gz-nav-projects-trigger');
+      if (t) t.setAttribute('aria-expanded', 'false');
+    }
+  });
+
+  // Streamlit doesn't scroll the window/body in this version (1.57) — the
+  // actual scrollable element is [data-testid="stMain"] (overflow-y: auto);
+  // document.body stays collapsed and window.scrollY never moves. Scroll
+  // events on that element don't bubble, so listen on doc with capture:true,
+  // which does still catch them fired from a descendant.
+  function scrollHost() { return doc.querySelector('[data-testid="stMain"]'); }
+
+  doc.addEventListener('click', function (e) {
+    if (e.target.closest && e.target.closest('#gz-jump-top')) {
+      const host = scrollHost();
+      if (host) host.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  });
+  doc.addEventListener('scroll', function (e) {
+    if (e.target !== scrollHost()) return;
+    const top = e.target.scrollTop;
+    doc.querySelectorAll('.gz-jump-top').forEach(function (b) {
+      b.classList.toggle('gz-visible', top > 1);
+    });
+  }, true);
+})();
+</script>
+""",
+        height=0,
     )
 
 
